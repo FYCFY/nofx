@@ -1041,10 +1041,18 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("]\n```\n")
 	sb.WriteString("</decision>\n\n")
 	sb.WriteString("## Field Description\n\n")
-	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
+	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait | place_limit_buy | place_limit_sell | cancel_order | cancel_all_orders | update_stop_loss | update_take_profit\n")
 	sb.WriteString(fmt.Sprintf("- `confidence`: 0-100 (opening recommended ≥ %d)\n", riskControl.MinConfidence))
-	sb.WriteString("- Required when opening: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd\n")
+	sb.WriteString("- Required when opening (market or limit): leverage, position_size_usd/quantity, stop_loss, take_profit, confidence, risk_usd\n")
+	sb.WriteString("- Limit orders: must provide `price` + `quantity`, optional `post_only`, `client_id`, `reduce_only`\n")
+	sb.WriteString("- Cancel: `cancel_order` needs `order_id` or `client_id`; `cancel_all_orders` cancels all pending orders for the symbol\n")
+	sb.WriteString("- Update SL/TP: use `update_stop_loss` or `update_take_profit` with `price` (optional `position_side`, `quantity` defaults to full)\n")
 	sb.WriteString("- **IMPORTANT**: All numeric values must be calculated numbers, NOT formulas/expressions (e.g., use `27.76` not `3000 * 0.01`)\n\n")
+
+	sb.WriteString("## Open Orders & Maker Behavior\n")
+	sb.WriteString("- You will see current pending orders (limit/SL/TP) with price/side/post_only/CID/age; avoid placing duplicate same-side orders within narrow price bands\n")
+	sb.WriteString("- Prefer adjusting or canceling stale orders over stacking new ones; use `cancel_order`/`cancel_all_orders` when appropriate\n")
+	sb.WriteString("- Maker (post_only) limits are preferred; respect spacing and per-symbol caps to prevent spam\n\n")
 
 	// 8. Custom Prompt
 	if e.config.CustomPrompt != "" {
