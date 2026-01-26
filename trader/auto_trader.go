@@ -1644,6 +1644,9 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision,
 	if err != nil {
 		return err
 	}
+	if err := at.trader.CancelStopLossOrders(decision.Symbol); err != nil {
+		return fmt.Errorf("failed to cancel existing stop-loss orders: %w", err)
+	}
 	if err := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, decision.Price); err != nil {
 		return err
 	}
@@ -1657,6 +1660,9 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *kernel.Decisio
 	positionSide, qty, err := at.getPositionSideAndQuantity(decision)
 	if err != nil {
 		return err
+	}
+	if err := at.trader.CancelTakeProfitOrders(decision.Symbol); err != nil {
+		return fmt.Errorf("failed to cancel existing take-profit orders: %w", err)
 	}
 	if err := at.trader.SetTakeProfit(decision.Symbol, positionSide, qty, decision.Price); err != nil {
 		return err
