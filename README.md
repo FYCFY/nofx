@@ -184,6 +184,12 @@ curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bas
 
 This one-liner pulls the latest official images and restarts services automatically.
 
+**Using the FYCFY fork?** Use the fork update script instead (defaults to `~/nofx`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FYCFY/nofx/dev/install-fork.sh | bash
+```
+
 ### Manual Installation (For Developers)
 
 #### Prerequisites
