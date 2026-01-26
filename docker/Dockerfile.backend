@@ -6,14 +6,16 @@
 # Versions extracted as ARGs for maintainability
 # ═══════════════════════════════════════════════════════════════
 
+ARG BASE_GOLANG=golang
 ARG GO_VERSION=1.25-alpine
+ARG BASE_ALPINE=alpine
 ARG ALPINE_VERSION=latest
 ARG TA_LIB_VERSION=0.4.0
 
 # ──────────────────────────────────────────────────────────────
 # TA-Lib Build Stage (shared across builds)
 # ──────────────────────────────────────────────────────────────
-FROM alpine:${ALPINE_VERSION} AS ta-lib-builder
+FROM ${BASE_ALPINE}:${ALPINE_VERSION} AS ta-lib-builder
 ARG TA_LIB_VERSION
 
 RUN apk update && apk add --no-cache \
@@ -36,7 +38,7 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-${TA_LIB_VERSION}-src.
 # ──────────────────────────────────────────────────────────────
 # Backend Build Stage (Go Application)
 # ──────────────────────────────────────────────────────────────
-FROM golang:${GO_VERSION} AS backend-builder
+FROM ${BASE_GOLANG}:${GO_VERSION} AS backend-builder
 
 RUN apk update && apk add --no-cache git make gcc g++ musl-dev
 
@@ -54,7 +56,7 @@ RUN CGO_ENABLED=1 GOOS=linux \
 # ──────────────────────────────────────────────────────────────
 # Runtime Stage (Minimal Executable Environment)
 # ──────────────────────────────────────────────────────────────
-FROM alpine:${ALPINE_VERSION}
+FROM ${BASE_ALPINE}:${ALPINE_VERSION}
 
 RUN apk update && apk add --no-cache ca-certificates tzdata sqlite
 

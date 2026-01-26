@@ -116,6 +116,10 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
             VERSION=${{ github.ref_name }}
+            BASE_ALPINE=mirror.gcr.io/library/alpine
+            BASE_GOLANG=mirror.gcr.io/library/golang
+            BASE_NODE=mirror.gcr.io/library/node
+            BASE_NGINX=mirror.gcr.io/library/nginx
 
       - name: Image digest
         run: |
