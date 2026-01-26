@@ -1606,7 +1606,10 @@ func (at *AutoTrader) executeCancelOrderWithRecord(decision *kernel.Decision, ac
 	}
 
 	if err := gridTrader.CancelOrder(decision.Symbol, orderID); err != nil {
-		return err
+		if !isOrderAlreadyClosed(err) {
+			return err
+		}
+		logger.Infof("[%s] Order already closed on exchange, clearing pending: %s", at.name, orderID)
 	}
 
 	at.pendingLimitOrdersMu.Lock()
@@ -2649,6 +2652,69 @@ func (at *AutoTrader) getPendingLimitOrder(orderID string) *pendingLimitOrder {
 	return at.pendingLimitOrders[pendingLimitOrderKey(orderID, "", "")]
 }
 
+func isClosePositionOrderConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "-4130") ||
+		strings.Contains(msg, "closePosition") ||
+		strings.Contains(msg, "open stop or take profit")
+}
+
+func isOrderAlreadyClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "-2011") ||
+		strings.Contains(msg, "unknown order") ||
+		strings.Contains(msg, "order does not exist") ||
+		strings.Contains(msg, "order not found") ||
+		strings.Contains(msg, "already filled") ||
+		strings.Contains(msg, "order filled") ||
+		strings.Contains(msg, "already canceled") ||
+		strings.Contains(msg, "already cancelled") ||
+		strings.Contains(msg, "already closed")
+}
+
+func (at *AutoTrader) cancelClosePositionOrders(symbol string) {
+	if err := at.trader.CancelStopLossOrders(symbol); err != nil {
+		logger.Warnf("[%s] Failed to cancel stop-loss orders for %s: %v", at.name, symbol, err)
+	}
+	if err := at.trader.CancelTakeProfitOrders(symbol); err != nil {
+		logger.Warnf("[%s] Failed to cancel take-profit orders for %s: %v", at.name, symbol, err)
+	}
+}
+
+func (at *AutoTrader) setStopLossWithRetry(symbol, positionSide string, qty, stopLoss float64) error {
+	if stopLoss <= 0 {
+		return nil
+	}
+	if err := at.trader.SetStopLoss(symbol, positionSide, qty, stopLoss); err != nil {
+		if isClosePositionOrderConflict(err) {
+			at.cancelClosePositionOrders(symbol)
+			return at.trader.SetStopLoss(symbol, positionSide, qty, stopLoss)
+		}
+		return err
+	}
+	return nil
+}
+
+func (at *AutoTrader) setTakeProfitWithRetry(symbol, positionSide string, qty, takeProfit float64) error {
+	if takeProfit <= 0 {
+		return nil
+	}
+	if err := at.trader.SetTakeProfit(symbol, positionSide, qty, takeProfit); err != nil {
+		if isClosePositionOrderConflict(err) {
+			at.cancelClosePositionOrders(symbol)
+			return at.trader.SetTakeProfit(symbol, positionSide, qty, takeProfit)
+		}
+		return err
+	}
+	return nil
+}
+
 func (at *AutoTrader) syncPendingLimitOrders() {
 	orders := at.listPendingLimitOrders()
 	if len(orders) == 0 {
@@ -2684,17 +2750,13 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 					positionSide = "SHORT"
 				}
 				var setErr error
-				if order.StopLoss > 0 {
-					if err := at.trader.SetStopLoss(order.Symbol, positionSide, qty, order.StopLoss); err != nil {
-						setErr = err
-						logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
-					}
+				if err := at.setStopLossWithRetry(order.Symbol, positionSide, qty, order.StopLoss); err != nil {
+					setErr = err
+					logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
 				}
-				if order.TakeProfit > 0 {
-					if err := at.trader.SetTakeProfit(order.Symbol, positionSide, qty, order.TakeProfit); err != nil {
-						setErr = err
-						logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
-					}
+				if err := at.setTakeProfitWithRetry(order.Symbol, positionSide, qty, order.TakeProfit); err != nil {
+					setErr = err
+					logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
 				}
 				if setErr == nil {
 					at.removePendingLimitOrder(order.Key)
@@ -2726,17 +2788,13 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 			}
 
 			var setErr error
-			if order.StopLoss > 0 {
-				if err := at.trader.SetStopLoss(order.Symbol, positionSide, execQty, order.StopLoss); err != nil {
-					setErr = err
-					logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
-				}
+			if err := at.setStopLossWithRetry(order.Symbol, positionSide, execQty, order.StopLoss); err != nil {
+				setErr = err
+				logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
 			}
-			if order.TakeProfit > 0 {
-				if err := at.trader.SetTakeProfit(order.Symbol, positionSide, execQty, order.TakeProfit); err != nil {
-					setErr = err
-					logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
-				}
+			if err := at.setTakeProfitWithRetry(order.Symbol, positionSide, execQty, order.TakeProfit); err != nil {
+				setErr = err
+				logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
 			}
 
 			if setErr == nil {
