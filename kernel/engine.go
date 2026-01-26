@@ -115,6 +115,8 @@ type PendingOrder struct {
 	Price        float64 `json:"price,omitempty"`
 	StopPrice    float64 `json:"stop_price,omitempty"`
 	Quantity     float64 `json:"quantity,omitempty"`
+	StopLoss     float64 `json:"stop_loss,omitempty"`
+	TakeProfit   float64 `json:"take_profit,omitempty"`
 	PostOnly     bool    `json:"post_only,omitempty"`
 	AgeSeconds   int64   `json:"age_seconds,omitempty"`
 }

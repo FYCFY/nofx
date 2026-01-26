@@ -1074,6 +1074,8 @@ func (at *AutoTrader) collectOpenLimitOrdersFromExchange(openOrders []OpenOrder)
 			pending.ClientID = meta.ClientID
 			pending.PostOnly = meta.PostOnly
 			pending.AgeSeconds = int64(time.Since(meta.CreatedAt).Seconds())
+			pending.StopLoss = meta.StopLoss
+			pending.TakeProfit = meta.TakeProfit
 		}
 
 		orders = append(orders, pending)

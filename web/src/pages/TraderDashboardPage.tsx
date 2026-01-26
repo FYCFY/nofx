@@ -860,6 +860,8 @@ export function TraderDashboardPage({
                                                 <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-left">{t('symbol', language)}</th>
                                                 <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center">{t('side', language)}</th>
                                                 <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right">{t('orderPrice', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right hidden md:table-cell">{t('stopLoss', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right hidden md:table-cell">{t('takeProfit', language)}</th>
                                                 <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right">{t('quantity', language)}</th>
                                                 <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderType', language)}</th>
                                                 <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('postOnly', language)}</th>
@@ -902,6 +904,12 @@ export function TraderDashboardPage({
                                                         </td>
                                                         <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main">
                                                             {displayPrice > 0 ? displayPrice.toFixed(4) : '-'}
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main hidden md:table-cell">
+                                                            {order.stop_loss && order.stop_loss > 0 ? order.stop_loss.toFixed(4) : '-'}
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main hidden md:table-cell">
+                                                            {order.take_profit && order.take_profit > 0 ? order.take_profit.toFixed(4) : '-'}
                                                         </td>
                                                         <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main">
                                                             {order.quantity ? order.quantity.toFixed(4) : '-'}

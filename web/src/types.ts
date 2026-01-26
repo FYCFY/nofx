@@ -52,6 +52,8 @@ export interface PendingOrder {
   price?: number
   stop_price?: number
   quantity?: number
+  stop_loss?: number
+  take_profit?: number
   post_only?: boolean
   age_seconds?: number
 }
