@@ -155,6 +155,12 @@ curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bas
 
 此命令会拉取最新官方镜像并自动重启服务。
 
+**使用 FYCFY fork？** 请使用 fork 的一键更新脚本（默认安装/更新到 `~/nofx`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FYCFY/nofx/dev/install-fork.sh | bash
+```
+
 ### 手动安装 (开发者)
 
 #### 前置条件
