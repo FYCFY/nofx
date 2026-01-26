@@ -2115,6 +2115,36 @@ func (t *HyperliquidTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 	return result, nil
 }
 
+// GetOpenOrdersAll gets all open/pending orders for the account
+func (t *HyperliquidTrader) GetOpenOrdersAll() ([]OpenOrder, error) {
+	openOrders, err := t.exchange.Info().OpenOrders(t.ctx, t.walletAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get open orders: %w", err)
+	}
+
+	var result []OpenOrder
+	for _, order := range openOrders {
+		side := "BUY"
+		if order.Side == "A" {
+			side = "SELL"
+		}
+
+		result = append(result, OpenOrder{
+			OrderID:      fmt.Sprintf("%d", order.Oid),
+			Symbol:       order.Coin,
+			Side:         side,
+			PositionSide: "",
+			Type:         "LIMIT",
+			Price:        order.LimitPx,
+			StopPrice:    0,
+			Quantity:     order.Size,
+			Status:       "NEW",
+		})
+	}
+
+	return result, nil
+}
+
 // PlaceLimitOrder places a limit order for grid trading
 // Implements GridTrader interface
 func (t *HyperliquidTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderResult, error) {

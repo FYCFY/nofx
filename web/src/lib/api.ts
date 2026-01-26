@@ -364,9 +364,16 @@ export const api = {
   },
 
   // 获取挂单列表（AI限价挂单，支持trader_id）
-  async getPendingOrders(traderId?: string): Promise<PendingOrder[]> {
-    const url = traderId
-      ? `${API_BASE}/pending-orders?trader_id=${traderId}`
+  async getPendingOrders(traderId?: string, symbol?: string): Promise<PendingOrder[]> {
+    const params = new URLSearchParams()
+    if (traderId) {
+      params.append('trader_id', traderId)
+    }
+    if (symbol) {
+      params.append('symbol', symbol)
+    }
+    const url = params.toString()
+      ? `${API_BASE}/pending-orders?${params.toString()}`
       : `${API_BASE}/pending-orders`
     const result = await httpClient.get<PendingOrder[]>(url)
     if (!result.success) throw new Error('获取挂单列表失败')

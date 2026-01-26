@@ -2435,7 +2435,12 @@ func (s *Server) handlePendingOrders(c *gin.Context) {
 		return
 	}
 
-	orders, err := trader.GetOpenLimitOrdersSnapshot()
+	symbol := c.Query("symbol")
+	if symbol != "" {
+		symbol = market.Normalize(symbol)
+	}
+
+	orders, err := trader.GetOpenLimitOrdersSnapshot(symbol)
 	if err != nil {
 		SafeInternalError(c, "Get pending orders", err)
 		return

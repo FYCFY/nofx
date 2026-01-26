@@ -963,6 +963,58 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 	return result, nil
 }
 
+// GetOpenOrdersAll gets all open/pending orders for the account
+func (t *FuturesTrader) GetOpenOrdersAll() ([]OpenOrder, error) {
+	var result []OpenOrder
+
+	orders, err := t.client.NewListOpenOrdersService().Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get open orders: %w", err)
+	}
+
+	for _, order := range orders {
+		price, _ := strconv.ParseFloat(order.Price, 64)
+		stopPrice, _ := strconv.ParseFloat(order.StopPrice, 64)
+		quantity, _ := strconv.ParseFloat(order.OrigQuantity, 64)
+
+		result = append(result, OpenOrder{
+			OrderID:      fmt.Sprintf("%d", order.OrderID),
+			Symbol:       order.Symbol,
+			Side:         string(order.Side),
+			PositionSide: string(order.PositionSide),
+			Type:         string(order.Type),
+			Price:        price,
+			StopPrice:    stopPrice,
+			Quantity:     quantity,
+			Status:       string(order.Status),
+		})
+	}
+
+	algoOrders, err := t.client.NewListOpenAlgoOrdersService().Do(context.Background())
+	if err == nil {
+		for _, algoOrder := range algoOrders {
+			triggerPrice, _ := strconv.ParseFloat(algoOrder.TriggerPrice, 64)
+			quantity, _ := strconv.ParseFloat(algoOrder.Quantity, 64)
+
+			result = append(result, OpenOrder{
+				OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
+				Symbol:       algoOrder.Symbol,
+				Side:         string(algoOrder.Side),
+				PositionSide: string(algoOrder.PositionSide),
+				Type:         string(algoOrder.OrderType),
+				Price:        0,
+				StopPrice:    triggerPrice,
+				Quantity:     quantity,
+				Status:       "NEW",
+			})
+		}
+	} else if !contains(err.Error(), "no algo") && !contains(err.Error(), "No algo") {
+		logger.Infof("  ⚠ Failed to get Algo orders: %v", err)
+	}
+
+	return result, nil
+}
+
 // GetMarketPrice gets market price
 func (t *FuturesTrader) GetMarketPrice(symbol string) (float64, error) {
 	prices, err := t.client.NewListPricesService().Symbol(symbol).Do(context.Background())

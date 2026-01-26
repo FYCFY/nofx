@@ -1027,40 +1027,48 @@ func (at *AutoTrader) collectOpenLimitOrders(positions []kernel.PositionInfo, ca
 }
 
 func (at *AutoTrader) collectOpenLimitOrdersForSymbols(symbolSet map[string]bool) []kernel.PendingOrder {
-	orders := make([]kernel.PendingOrder, 0)
-	seen := make(map[string]bool)
+	openOrders := make([]OpenOrder, 0)
 
 	for symbol := range symbolSet {
-		openOrders, err := at.trader.GetOpenOrders(symbol)
+		orders, err := at.trader.GetOpenOrders(symbol)
 		if err != nil {
 			logger.Warnf("[%s] Failed to get open orders for %s: %v", at.name, symbol, err)
 			continue
 		}
-		for _, order := range openOrders {
-			if !isLimitOrderType(order.Type) {
-				continue
-			}
-			pending := kernel.PendingOrder{
-				OrderID:      order.OrderID,
-				Symbol:       order.Symbol,
-				Side:         order.Side,
-				PositionSide: order.PositionSide,
-				Type:         order.Type,
-				Price:        order.Price,
-				StopPrice:    order.StopPrice,
-				Quantity:     order.Quantity,
-			}
+		openOrders = append(openOrders, orders...)
+	}
 
-			if meta := at.getPendingLimitOrder(order.OrderID); meta != nil {
-				pending.ClientID = meta.ClientID
-				pending.PostOnly = meta.PostOnly
-				pending.AgeSeconds = int64(time.Since(meta.CreatedAt).Seconds())
-			}
+	return at.collectOpenLimitOrdersFromExchange(openOrders)
+}
 
-			orders = append(orders, pending)
-			if order.OrderID != "" {
-				seen[order.OrderID] = true
-			}
+func (at *AutoTrader) collectOpenLimitOrdersFromExchange(openOrders []OpenOrder) []kernel.PendingOrder {
+	orders := make([]kernel.PendingOrder, 0, len(openOrders))
+	seen := make(map[string]bool)
+
+	for _, order := range openOrders {
+		if !isLimitOrderType(order.Type) {
+			continue
+		}
+		pending := kernel.PendingOrder{
+			OrderID:      order.OrderID,
+			Symbol:       order.Symbol,
+			Side:         order.Side,
+			PositionSide: order.PositionSide,
+			Type:         order.Type,
+			Price:        order.Price,
+			StopPrice:    order.StopPrice,
+			Quantity:     order.Quantity,
+		}
+
+		if meta := at.getPendingLimitOrder(order.OrderID); meta != nil {
+			pending.ClientID = meta.ClientID
+			pending.PostOnly = meta.PostOnly
+			pending.AgeSeconds = int64(time.Since(meta.CreatedAt).Seconds())
+		}
+
+		orders = append(orders, pending)
+		if order.OrderID != "" {
+			seen[order.OrderID] = true
 		}
 	}
 
@@ -1089,13 +1097,16 @@ func (at *AutoTrader) collectOpenLimitOrdersForSymbols(symbolSet map[string]bool
 	return orders
 }
 
-func (at *AutoTrader) GetOpenLimitOrdersSnapshot() ([]kernel.PendingOrder, error) {
+func (at *AutoTrader) GetOpenLimitOrdersSnapshot(symbol string) ([]kernel.PendingOrder, error) {
 	positions, err := at.trader.GetPositions()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get positions: %w", err)
 	}
 
 	symbolSet := make(map[string]bool)
+	if symbol != "" {
+		symbolSet[market.Normalize(symbol)] = true
+	}
 	for _, pos := range positions {
 		if symbol, ok := pos["symbol"].(string); ok && symbol != "" {
 			symbolSet[symbol] = true
@@ -1104,6 +1115,16 @@ func (at *AutoTrader) GetOpenLimitOrdersSnapshot() ([]kernel.PendingOrder, error
 	for _, pending := range at.listPendingLimitOrders() {
 		if pending.Symbol != "" {
 			symbolSet[pending.Symbol] = true
+		}
+	}
+
+	if symbol == "" {
+		if allGetter, ok := at.trader.(OpenOrdersAllGetter); ok {
+			openOrders, err := allGetter.GetOpenOrdersAll()
+			if err == nil {
+				return at.collectOpenLimitOrdersFromExchange(openOrders), nil
+			}
+			logger.Warnf("[%s] Failed to get all open orders: %v", at.name, err)
 		}
 	}
 

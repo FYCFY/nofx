@@ -828,130 +828,130 @@ export function TraderDashboardPage({
                                 </div>
                             )}
                         </div>
-                    </div>
 
-                    {/* Pending Orders */}
-                    <div
-                        className="nofx-glass p-6 animate-slide-in relative overflow-hidden group"
-                        style={{ animationDelay: '0.18s' }}
-                    >
-                        <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
-                            <div className="w-24 h-24 rounded-full bg-yellow-500 blur-3xl" />
-                        </div>
-                        <div className="flex items-center justify-between mb-5 relative z-10">
-                            <h2 className="text-lg font-bold flex items-center gap-2 text-nofx-text-main uppercase tracking-wide">
-                                <span className="text-yellow-500">◈</span> {t('pendingOrders', language)}
-                            </h2>
-                            {pendingOrders.length > 0 && (
-                                <div className="text-xs px-2 py-1 rounded bg-nofx-gold/10 text-nofx-gold border border-nofx-gold/20 font-mono shadow-[0_0_10px_rgba(240,185,11,0.1)]">
-                                    {pendingOrders.length} {language === 'zh' ? '单' : 'open'}
+                        {/* Pending Orders */}
+                        <div
+                            className="nofx-glass p-6 animate-slide-in relative overflow-hidden group"
+                            style={{ animationDelay: '0.18s' }}
+                        >
+                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+                                <div className="w-24 h-24 rounded-full bg-yellow-500 blur-3xl" />
+                            </div>
+                            <div className="flex items-center justify-between mb-5 relative z-10">
+                                <h2 className="text-lg font-bold flex items-center gap-2 text-nofx-text-main uppercase tracking-wide">
+                                    <span className="text-yellow-500">◈</span> {t('pendingOrders', language)}
+                                </h2>
+                                {pendingOrders.length > 0 && (
+                                    <div className="text-xs px-2 py-1 rounded bg-nofx-gold/10 text-nofx-gold border border-nofx-gold/20 font-mono shadow-[0_0_10px_rgba(240,185,11,0.1)]">
+                                        {pendingOrders.length} {language === 'zh' ? '单' : 'open'}
+                                    </div>
+                                )}
+                            </div>
+                            {pendingOrdersLoading && pendingOrders.length === 0 ? (
+                                <div className="flex items-center justify-center py-10 text-nofx-text-muted">
+                                    <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                                    {language === 'zh' ? '加载挂单中...' : 'Loading pending orders...'}
+                                </div>
+                            ) : pendingOrders.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead className="text-left border-b border-white/5">
+                                            <tr>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-left">{t('symbol', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center">{t('side', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right">{t('orderPrice', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right">{t('quantity', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderType', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('postOnly', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderAge', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderId', language)}</th>
+                                                <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center">{t('cancelOrder', language)}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {pendingOrders.map((order, i) => {
+                                                const orderKey = order.order_id || order.client_id || `${order.symbol}-${i}`
+                                                const canCancel = !!(order.order_id || order.client_id)
+                                                const positionSide = (order.position_side || (order.side?.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT')).toUpperCase()
+                                                const isLong = positionSide === 'LONG'
+                                                const displayPrice = order.price && order.price > 0 ? order.price : (order.stop_price || 0)
+                                                return (
+                                                    <tr
+                                                        key={orderKey}
+                                                        className="border-b border-white/5 last:border-0 transition-all hover:bg-white/5 cursor-pointer group/row"
+                                                        onClick={() => {
+                                                            setSelectedChartSymbol(order.symbol)
+                                                            setChartUpdateKey(Date.now())
+                                                            if (chartSectionRef.current) {
+                                                                chartSectionRef.current.scrollIntoView({
+                                                                    behavior: 'smooth',
+                                                                    block: 'start',
+                                                                })
+                                                            }
+                                                        }}
+                                                    >
+                                                        <td className="px-1 py-3 font-mono font-semibold whitespace-nowrap text-left text-nofx-text-main group-hover/row:text-white transition-colors">
+                                                            {order.symbol}
+                                                        </td>
+                                                        <td className="px-1 py-3 whitespace-nowrap text-center">
+                                                            <span
+                                                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${isLong ? 'bg-nofx-green/10 text-nofx-green shadow-[0_0_8px_rgba(14,203,129,0.2)]' : 'bg-nofx-red/10 text-nofx-red shadow-[0_0_8px_rgba(246,70,93,0.2)]'}`}
+                                                            >
+                                                                {t(isLong ? 'long' : 'short', language)}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main">
+                                                            {displayPrice > 0 ? displayPrice.toFixed(4) : '-'}
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main">
+                                                            {order.quantity ? order.quantity.toFixed(4) : '-'}
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-center text-nofx-text-muted hidden md:table-cell">
+                                                            {order.type || 'LIMIT'}
+                                                        </td>
+                                                        <td className="px-1 py-3 whitespace-nowrap text-center hidden md:table-cell">
+                                                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${order.post_only ? 'bg-nofx-gold/10 text-nofx-gold' : 'bg-white/5 text-nofx-text-muted'}`}>
+                                                                {order.post_only ? 'MKR' : '—'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-center text-nofx-text-muted hidden md:table-cell">
+                                                            {formatOrderAge(order.age_seconds)}
+                                                        </td>
+                                                        <td className="px-1 py-3 font-mono whitespace-nowrap text-center text-nofx-text-muted hidden md:table-cell">
+                                                            {(order.order_id || order.client_id || '-').toString().slice(0, 10)}
+                                                        </td>
+                                                        <td className="px-1 py-3 whitespace-nowrap text-center">
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation()
+                                                                    handleCancelPendingOrder(order)
+                                                                }}
+                                                                disabled={!canCancel || cancelingOrderId === orderKey}
+                                                                className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold transition-all hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed mx-auto bg-nofx-red/10 text-nofx-red border border-nofx-red/30 hover:bg-nofx-red/20"
+                                                                title={language === 'zh' ? '撤销挂单' : 'Cancel Order'}
+                                                            >
+                                                                {cancelingOrderId === orderKey ? (
+                                                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                                                ) : (
+                                                                    <LogOut className="w-3 h-3" />
+                                                                )}
+                                                                {t('cancelOrder', language)}
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                )
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                <div className="text-center py-12 text-nofx-text-muted opacity-60">
+                                    <div className="text-5xl mb-3 opacity-50 grayscale">🧾</div>
+                                    <div className="text-lg font-semibold mb-2">{t('noPendingOrders', language)}</div>
                                 </div>
                             )}
                         </div>
-                        {pendingOrdersLoading && pendingOrders.length === 0 ? (
-                            <div className="flex items-center justify-center py-10 text-nofx-text-muted">
-                                <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                                {language === 'zh' ? '加载挂单中...' : 'Loading pending orders...'}
-                            </div>
-                        ) : pendingOrders.length > 0 ? (
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-xs">
-                                    <thead className="text-left border-b border-white/5">
-                                        <tr>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-left">{t('symbol', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center">{t('side', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right">{t('orderPrice', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-right">{t('quantity', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderType', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('postOnly', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderAge', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center hidden md:table-cell">{t('orderId', language)}</th>
-                                            <th className="px-1 pb-3 font-semibold text-nofx-text-muted whitespace-nowrap text-center">{t('cancelOrder', language)}</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {pendingOrders.map((order, i) => {
-                                            const orderKey = order.order_id || order.client_id || `${order.symbol}-${i}`
-                                            const canCancel = !!(order.order_id || order.client_id)
-                                            const positionSide = (order.position_side || (order.side?.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT')).toUpperCase()
-                                            const isLong = positionSide === 'LONG'
-                                            const displayPrice = order.price && order.price > 0 ? order.price : (order.stop_price || 0)
-                                            return (
-                                                <tr
-                                                    key={orderKey}
-                                                    className="border-b border-white/5 last:border-0 transition-all hover:bg-white/5 cursor-pointer group/row"
-                                                    onClick={() => {
-                                                        setSelectedChartSymbol(order.symbol)
-                                                        setChartUpdateKey(Date.now())
-                                                        if (chartSectionRef.current) {
-                                                            chartSectionRef.current.scrollIntoView({
-                                                                behavior: 'smooth',
-                                                                block: 'start',
-                                                            })
-                                                        }
-                                                    }}
-                                                >
-                                                    <td className="px-1 py-3 font-mono font-semibold whitespace-nowrap text-left text-nofx-text-main group-hover/row:text-white transition-colors">
-                                                        {order.symbol}
-                                                    </td>
-                                                    <td className="px-1 py-3 whitespace-nowrap text-center">
-                                                        <span
-                                                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${isLong ? 'bg-nofx-green/10 text-nofx-green shadow-[0_0_8px_rgba(14,203,129,0.2)]' : 'bg-nofx-red/10 text-nofx-red shadow-[0_0_8px_rgba(246,70,93,0.2)]'}`}
-                                                        >
-                                                            {t(isLong ? 'long' : 'short', language)}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main">
-                                                        {displayPrice > 0 ? displayPrice.toFixed(4) : '-'}
-                                                    </td>
-                                                    <td className="px-1 py-3 font-mono whitespace-nowrap text-right text-nofx-text-main">
-                                                        {order.quantity ? order.quantity.toFixed(4) : '-'}
-                                                    </td>
-                                                    <td className="px-1 py-3 font-mono whitespace-nowrap text-center text-nofx-text-muted hidden md:table-cell">
-                                                        {order.type || 'LIMIT'}
-                                                    </td>
-                                                    <td className="px-1 py-3 whitespace-nowrap text-center hidden md:table-cell">
-                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${order.post_only ? 'bg-nofx-gold/10 text-nofx-gold' : 'bg-white/5 text-nofx-text-muted'}`}>
-                                                            {order.post_only ? 'MKR' : '—'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-1 py-3 font-mono whitespace-nowrap text-center text-nofx-text-muted hidden md:table-cell">
-                                                        {formatOrderAge(order.age_seconds)}
-                                                    </td>
-                                                    <td className="px-1 py-3 font-mono whitespace-nowrap text-center text-nofx-text-muted hidden md:table-cell">
-                                                        {(order.order_id || order.client_id || '-').toString().slice(0, 10)}
-                                                    </td>
-                                                    <td className="px-1 py-3 whitespace-nowrap text-center">
-                                                        <button
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation()
-                                                                handleCancelPendingOrder(order)
-                                                            }}
-                                                            disabled={!canCancel || cancelingOrderId === orderKey}
-                                                            className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold transition-all hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed mx-auto bg-nofx-red/10 text-nofx-red border border-nofx-red/30 hover:bg-nofx-red/20"
-                                                            title={language === 'zh' ? '撤销挂单' : 'Cancel Order'}
-                                                        >
-                                                            {cancelingOrderId === orderKey ? (
-                                                                <Loader2 className="w-3 h-3 animate-spin" />
-                                                            ) : (
-                                                                <LogOut className="w-3 h-3" />
-                                                            )}
-                                                            {t('cancelOrder', language)}
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            )
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        ) : (
-                            <div className="text-center py-12 text-nofx-text-muted opacity-60">
-                                <div className="text-5xl mb-3 opacity-50 grayscale">🧾</div>
-                                <div className="text-lg font-semibold mb-2">{t('noPendingOrders', language)}</div>
-                            </div>
-                        )}
                     </div>
 
                     {/* Right Column: Recent Decisions */}

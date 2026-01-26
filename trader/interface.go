@@ -117,6 +117,11 @@ type OpenOrder struct {
 	Status       string  `json:"status"` // NEW
 }
 
+// OpenOrdersAllGetter is an optional interface for exchanges that can query all open orders at once.
+type OpenOrdersAllGetter interface {
+	GetOpenOrdersAll() ([]OpenOrder, error)
+}
+
 // LimitOrderRequest represents a limit order request for grid trading
 type LimitOrderRequest struct {
 	Symbol       string  `json:"symbol"`
