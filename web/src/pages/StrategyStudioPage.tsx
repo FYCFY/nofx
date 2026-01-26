@@ -64,6 +64,7 @@ export function StrategyStudioPage() {
     coinSource: true,
     indicators: false,
     riskControl: false,
+    orderExecution: false,
     promptSections: false,
     customPrompt: false,
     publishSettings: false,
@@ -497,6 +498,7 @@ export function StrategyStudioPage() {
       coinSource: { zh: '币种来源', en: 'Coin Source' },
       indicators: { zh: '技术指标', en: 'Indicators' },
       riskControl: { zh: '风控参数', en: 'Risk Control' },
+      orderExecution: { zh: '执行设置', en: 'Execution' },
       promptSections: { zh: 'Prompt 编辑', en: 'Prompt Editor' },
       customPrompt: { zh: '附加提示', en: 'Extra Prompt' },
       save: { zh: '保存', en: 'Save' },
@@ -514,6 +516,10 @@ export function StrategyStudioPage() {
       balanced: { zh: '平衡', en: 'Balanced' },
       aggressive: { zh: '激进', en: 'Aggressive' },
       conservative: { zh: '保守', en: 'Conservative' },
+      limitOrderEntry: { zh: '限价开仓', en: 'Limit Entry' },
+      limitOrderEntryDesc: { zh: '非网格策略允许 AI 使用 maker 限价开仓', en: 'Allow AI to place maker limit entries (non-grid)' },
+      limitOrderEntryOn: { zh: '开启', en: 'Enabled' },
+      limitOrderEntryOff: { zh: '关闭', en: 'Disabled' },
       selectModel: { zh: '选择 AI 模型', en: 'Select AI Model' },
       runTest: { zh: '运行 AI 测试', en: 'Run AI Test' },
       running: { zh: '运行中...', en: 'Running...' },
@@ -543,6 +549,7 @@ export function StrategyStudioPage() {
 
   // Get current strategy type (default to ai_trading if not set)
   const currentStrategyType = editingConfig?.strategy_type || 'ai_trading'
+  const limitOrdersEnabled = editingConfig?.enable_limit_orders !== false
 
   const configSections = [
     // Grid Config - only for grid_trading
@@ -605,6 +612,87 @@ export function StrategyStudioPage() {
           disabled={selectedStrategy?.is_default}
           language={language}
         />
+      ),
+    },
+    {
+      key: 'orderExecution' as const,
+      icon: Zap,
+      color: '#F59E0B',
+      title: t('orderExecution'),
+      forStrategyType: 'ai_trading' as const,
+      content: editingConfig && (
+        <div
+          className={`relative overflow-hidden rounded-lg transition-all duration-300 ${selectedStrategy?.is_default ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+          style={{
+            background: limitOrdersEnabled
+              ? 'linear-gradient(135deg, rgba(240, 185, 11, 0.15) 0%, rgba(240, 185, 11, 0.05) 100%)'
+              : 'linear-gradient(135deg, #1E2329 0%, #0B0E11 100%)',
+            border: limitOrdersEnabled ? '1px solid rgba(240, 185, 11, 0.4)' : '1px solid #2B3139',
+            boxShadow: limitOrdersEnabled ? '0 0 18px rgba(240, 185, 11, 0.12)' : 'none',
+          }}
+          onClick={() => {
+            if (!selectedStrategy?.is_default) {
+              updateConfig('enable_limit_orders', !limitOrdersEnabled)
+            }
+          }}
+        >
+          <div
+            className="absolute top-0 left-0 w-full h-[1px] transition-opacity duration-300"
+            style={{
+              background: limitOrdersEnabled
+                ? 'linear-gradient(90deg, transparent, #F0B90B, transparent)'
+                : 'linear-gradient(90deg, transparent, #2B3139, transparent)',
+              opacity: limitOrdersEnabled ? 1 : 0.5,
+            }}
+          />
+          <div className="p-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div
+                className="p-2.5 rounded-lg transition-all duration-300"
+                style={{
+                  background: limitOrdersEnabled ? 'rgba(240, 185, 11, 0.2)' : '#0B0E11',
+                  border: limitOrdersEnabled ? '1px solid rgba(240, 185, 11, 0.3)' : '1px solid #2B3139',
+                }}
+              >
+                <Zap className="w-5 h-5" style={{ color: limitOrdersEnabled ? '#F0B90B' : '#848E9C' }} />
+              </div>
+              <div>
+                <div className="text-sm font-medium" style={{ color: '#EAECEF' }}>
+                  {t('limitOrderEntry')}
+                </div>
+                <div className="text-xs mt-0.5" style={{ color: '#848E9C' }}>
+                  {t('limitOrderEntryDesc')}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span
+                className="text-[10px] font-mono font-bold tracking-wider"
+                style={{ color: limitOrdersEnabled ? '#F0B90B' : '#848E9C' }}
+              >
+                {limitOrdersEnabled ? t('limitOrderEntryOn') : t('limitOrderEntryOff')}
+              </span>
+              <div
+                className="relative w-12 h-6 rounded-full transition-all duration-300"
+                style={{
+                  background: limitOrdersEnabled
+                    ? 'linear-gradient(90deg, #F0B90B, #FCD34D)'
+                    : '#2B3139',
+                  boxShadow: limitOrdersEnabled ? '0 0 10px rgba(240, 185, 11, 0.35)' : 'none',
+                }}
+              >
+                <div
+                  className="absolute top-1 w-4 h-4 rounded-full transition-all duration-300"
+                  style={{
+                    background: '#EAECEF',
+                    left: limitOrdersEnabled ? '28px' : '4px',
+                    boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
       ),
     },
     {

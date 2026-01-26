@@ -2,6 +2,7 @@ import type {
   SystemStatus,
   AccountInfo,
   Position,
+  PendingOrder,
   DecisionRecord,
   Statistics,
   TraderInfo,
@@ -360,6 +361,39 @@ export const api = {
     const result = await httpClient.get<Position[]>(url)
     if (!result.success) throw new Error('获取持仓列表失败')
     return result.data!
+  },
+
+  // 获取挂单列表（AI限价挂单，支持trader_id）
+  async getPendingOrders(traderId?: string): Promise<PendingOrder[]> {
+    const url = traderId
+      ? `${API_BASE}/pending-orders?trader_id=${traderId}`
+      : `${API_BASE}/pending-orders`
+    const result = await httpClient.get<PendingOrder[]>(url)
+    if (!result.success) throw new Error('获取挂单列表失败')
+    return result.data!
+  },
+
+  // 撤销单个挂单
+  async cancelPendingOrder(
+    traderId: string,
+    symbol: string,
+    orderId?: string,
+    clientId?: string
+  ): Promise<void> {
+    const result = await httpClient.post(
+      `${API_BASE}/pending-orders/cancel?trader_id=${traderId}`,
+      { symbol, order_id: orderId, client_id: clientId }
+    )
+    if (!result.success) throw new Error('撤销挂单失败')
+  },
+
+  // 撤销指定交易对的全部挂单
+  async cancelAllPendingOrders(traderId: string, symbol: string): Promise<void> {
+    const result = await httpClient.post(
+      `${API_BASE}/pending-orders/cancel-all?trader_id=${traderId}`,
+      { symbol }
+    )
+    if (!result.success) throw new Error('撤销全部挂单失败')
   },
 
   // 获取决策日志（支持trader_id）

@@ -104,6 +104,21 @@ type RecentOrder struct {
 	HoldDuration string  `json:"hold_duration"` // Hold duration, e.g. "2h30m"
 }
 
+// PendingOrder pending limit order (for AI input)
+type PendingOrder struct {
+	OrderID      string  `json:"order_id"`
+	ClientID     string  `json:"client_id,omitempty"`
+	Symbol       string  `json:"symbol"`
+	Side         string  `json:"side"`
+	PositionSide string  `json:"position_side,omitempty"`
+	Type         string  `json:"type"`
+	Price        float64 `json:"price,omitempty"`
+	StopPrice    float64 `json:"stop_price,omitempty"`
+	Quantity     float64 `json:"quantity,omitempty"`
+	PostOnly     bool    `json:"post_only,omitempty"`
+	AgeSeconds   int64   `json:"age_seconds,omitempty"`
+}
+
 // Context trading context (complete information passed to AI)
 type Context struct {
 	CurrentTime     string                             `json:"current_time"`
@@ -115,6 +130,7 @@ type Context struct {
 	PromptVariant   string                             `json:"prompt_variant,omitempty"`
 	TradingStats    *TradingStats                      `json:"trading_stats,omitempty"`
 	RecentOrders    []RecentOrder                      `json:"recent_orders,omitempty"`
+	OpenOrders      []PendingOrder                     `json:"open_orders,omitempty"`
 	MarketDataMap   map[string]*market.Data            `json:"-"`
 	MultiTFMarket   map[string]map[string]*market.Data `json:"-"`
 	OITopDataMap    map[string]*OITopData              `json:"-"`
@@ -139,11 +155,15 @@ type Decision struct {
 	StopLoss        float64 `json:"stop_loss,omitempty"`
 	TakeProfit      float64 `json:"take_profit,omitempty"`
 
-	// Grid trading parameters
+	// Limit order parameters (grid and non-grid)
 	Price      float64 `json:"price,omitempty"`       // Limit order price (for grid)
 	Quantity   float64 `json:"quantity,omitempty"`    // Order quantity (for grid)
 	LevelIndex int     `json:"level_index,omitempty"` // Grid level index
 	OrderID    string  `json:"order_id,omitempty"`    // Order ID (for cancel)
+	ClientID   string  `json:"client_id,omitempty"`   // Client order ID (for tracking/cancel)
+	PostOnly   bool    `json:"post_only,omitempty"`   // Maker-only limit order
+	ReduceOnly bool    `json:"reduce_only,omitempty"` // Reduce-only order
+	PositionSide string `json:"position_side,omitempty"` // Optional position side (LONG/SHORT)
 
 	// Common parameters
 	Confidence int     `json:"confidence,omitempty"` // Confidence level (0-100)
@@ -1049,10 +1069,20 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("- Update SL/TP: use `update_stop_loss` or `update_take_profit` with `price` (optional `position_side`, `quantity` defaults to full)\n")
 	sb.WriteString("- **IMPORTANT**: All numeric values must be calculated numbers, NOT formulas/expressions (e.g., use `27.76` not `3000 * 0.01`)\n\n")
 
-	sb.WriteString("## Open Orders & Maker Behavior\n")
-	sb.WriteString("- You will see current pending orders (limit/SL/TP) with price/side/post_only/CID/age; avoid placing duplicate same-side orders within narrow price bands\n")
-	sb.WriteString("- Prefer adjusting or canceling stale orders over stacking new ones; use `cancel_order`/`cancel_all_orders` when appropriate\n")
-	sb.WriteString("- Maker (post_only) limits are preferred; respect spacing and per-symbol caps to prevent spam\n\n")
+	limitOrdersEnabled := true
+	if e.config != nil {
+		limitOrdersEnabled = e.config.LimitOrdersEnabled()
+	}
+	if limitOrdersEnabled {
+		sb.WriteString("## Open Orders & Maker Behavior\n")
+		sb.WriteString("- You will see current pending orders (limit/SL/TP) with price/side/post_only/CID/age; avoid placing duplicate same-side orders within narrow price bands\n")
+		sb.WriteString("- Prefer adjusting or canceling stale orders over stacking new ones; use `cancel_order`/`cancel_all_orders` when appropriate\n")
+		sb.WriteString("- Only one pending limit order per symbol/side; cancel or update existing orders before placing a new one\n")
+		sb.WriteString("- Maker (post_only) limits are preferred; respect spacing and per-symbol caps to prevent spam\n\n")
+	} else {
+		sb.WriteString("## Limit Order Entry\n")
+		sb.WriteString("- Limit order entry is disabled for this strategy; do NOT use `place_limit_buy`/`place_limit_sell`\n\n")
+	}
 
 	// 8. Custom Prompt
 	if e.config.CustomPrompt != "" {
@@ -1867,19 +1897,28 @@ func validateDecisions(decisions []Decision, accountEquity float64, btcEthLevera
 
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio float64) error {
 	validActions := map[string]bool{
-		"open_long":   true,
-		"open_short":  true,
-		"close_long":  true,
-		"close_short": true,
-		"hold":        true,
-		"wait":        true,
+		"open_long":        true,
+		"open_short":       true,
+		"close_long":       true,
+		"close_short":      true,
+		"hold":             true,
+		"wait":             true,
+		"place_limit_buy":  true,
+		"place_limit_sell": true,
+		"cancel_order":     true,
+		"cancel_all_orders": true,
+		"update_stop_loss": true,
+		"update_take_profit": true,
 	}
 
 	if !validActions[d.Action] {
 		return fmt.Errorf("invalid action: %s", d.Action)
 	}
 
-	if d.Action == "open_long" || d.Action == "open_short" {
+	isOpenAction := d.Action == "open_long" || d.Action == "open_short" || d.Action == "place_limit_buy" || d.Action == "place_limit_sell"
+	isLong := d.Action == "open_long" || d.Action == "place_limit_buy"
+
+	if isOpenAction {
 		maxLeverage := altcoinLeverage
 		posRatio := altcoinPosRatio
 		maxPositionValue := accountEquity * posRatio
@@ -1896,6 +1935,15 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			logger.Infof("⚠️  [Leverage Fallback] %s leverage exceeded (%dx > %dx), auto-adjusting to limit %dx",
 				d.Symbol, d.Leverage, maxLeverage, maxLeverage)
 			d.Leverage = maxLeverage
+		}
+
+		if d.Action == "place_limit_buy" || d.Action == "place_limit_sell" {
+			if d.Price <= 0 {
+				return fmt.Errorf("limit order price must be greater than 0")
+			}
+			if d.PositionSizeUSD <= 0 && d.Quantity > 0 {
+				d.PositionSizeUSD = d.Quantity * d.Price
+			}
 		}
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("position size must be greater than 0: %.2f", d.PositionSizeUSD)
@@ -1926,7 +1974,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			return fmt.Errorf("stop loss and take profit must be greater than 0")
 		}
 
-		if d.Action == "open_long" {
+		if isLong {
 			if d.StopLoss >= d.TakeProfit {
 				return fmt.Errorf("for long positions, stop loss price must be less than take profit price")
 			}
@@ -1936,15 +1984,29 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			}
 		}
 
-		var entryPrice float64
-		if d.Action == "open_long" {
-			entryPrice = d.StopLoss + (d.TakeProfit-d.StopLoss)*0.2
-		} else {
-			entryPrice = d.StopLoss - (d.StopLoss-d.TakeProfit)*0.2
+		if d.Price > 0 {
+			if isLong {
+				if d.StopLoss >= d.Price || d.Price >= d.TakeProfit {
+					return fmt.Errorf("limit order price must be between stop loss and take profit for long positions")
+				}
+			} else {
+				if d.TakeProfit >= d.Price || d.Price >= d.StopLoss {
+					return fmt.Errorf("limit order price must be between take profit and stop loss for short positions")
+				}
+			}
+		}
+
+		entryPrice := d.Price
+		if entryPrice <= 0 {
+			if isLong {
+				entryPrice = d.StopLoss + (d.TakeProfit-d.StopLoss)*0.2
+			} else {
+				entryPrice = d.StopLoss - (d.StopLoss-d.TakeProfit)*0.2
+			}
 		}
 
 		var riskPercent, rewardPercent, riskRewardRatio float64
-		if d.Action == "open_long" {
+		if isLong {
 			riskPercent = (entryPrice - d.StopLoss) / entryPrice * 100
 			rewardPercent = (d.TakeProfit - entryPrice) / entryPrice * 100
 			if riskPercent > 0 {
@@ -1961,6 +2023,26 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if riskRewardRatio < 3.0 {
 			return fmt.Errorf("risk/reward ratio too low (%.2f:1), must be ≥3.0:1 [risk: %.2f%% reward: %.2f%%] [stop loss: %.2f take profit: %.2f]",
 				riskRewardRatio, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
+		}
+	}
+
+	if d.Action == "cancel_order" {
+		if d.Symbol == "" {
+			return fmt.Errorf("cancel_order requires symbol")
+		}
+		if d.OrderID == "" && d.ClientID == "" {
+			return fmt.Errorf("cancel_order requires order_id or client_id")
+		}
+	}
+	if d.Action == "cancel_all_orders" && d.Symbol == "" {
+		return fmt.Errorf("cancel_all_orders requires symbol")
+	}
+	if d.Action == "update_stop_loss" || d.Action == "update_take_profit" {
+		if d.Symbol == "" {
+			return fmt.Errorf("%s requires symbol", d.Action)
+		}
+		if d.Price <= 0 {
+			return fmt.Errorf("%s requires price > 0", d.Action)
 		}
 	}
 

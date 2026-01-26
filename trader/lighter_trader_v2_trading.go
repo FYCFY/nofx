@@ -935,6 +935,9 @@ func (t *LighterTraderV2) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderRe
 
 	logger.Infof("📝 LIGHTER placing limit order: %s %s @ %.4f, qty=%.4f, leverage=%dx",
 		req.Symbol, req.Side, req.Price, req.Quantity, req.Leverage)
+	if req.PostOnly {
+		logger.Warnf("⚠️  LIGHTER PostOnly not supported, placing regular limit order")
+	}
 
 	// Set leverage before placing order (important for grid trading)
 	if req.Leverage > 0 {

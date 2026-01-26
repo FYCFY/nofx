@@ -750,16 +750,26 @@ func (t *FuturesTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderResu
 		positionSide = futures.PositionSideTypeShort
 	}
 
+	timeInForce := futures.TimeInForceTypeGTC
+	if req.PostOnly {
+		timeInForce = futures.TimeInForceTypeGTX
+	}
+
+	clientID := req.ClientID
+	if clientID == "" {
+		clientID = getBrOrderID()
+	}
+
 	// Build order service with broker ID
 	orderService := t.client.NewCreateOrderService().
 		Symbol(req.Symbol).
 		Side(side).
 		PositionSide(positionSide).
 		Type(futures.OrderTypeLimit).
-		TimeInForce(futures.TimeInForceTypeGTC).
+		TimeInForce(timeInForce).
 		Quantity(quantityStr).
 		Price(priceStr).
-		NewClientOrderID(getBrOrderID())
+		NewClientOrderID(clientID)
 
 	// Execute order
 	order, err := orderService.Do(context.Background())

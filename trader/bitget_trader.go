@@ -1240,6 +1240,14 @@ func (t *BitgetTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderResul
 		"clientOid":   genBitgetClientOid(),
 	}
 
+	if req.PostOnly {
+		body["force"] = "post_only"
+	}
+
+	if req.ClientID != "" {
+		body["clientOid"] = req.ClientID
+	}
+
 	// Add reduce only if specified
 	if req.ReduceOnly {
 		body["reduceOnly"] = "YES"

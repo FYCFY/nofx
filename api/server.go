@@ -10,6 +10,7 @@ import (
 	"nofx/backtest"
 	"nofx/config"
 	"nofx/crypto"
+	"nofx/kernel"
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/market"
@@ -204,6 +205,9 @@ func (s *Server) setupRoutes() {
 			protected.GET("/orders", s.handleOrders)               // Order list (all orders)
 			protected.GET("/orders/:id/fills", s.handleOrderFills) // Order fill details
 			protected.GET("/open-orders", s.handleOpenOrders)      // Open orders from exchange (pending SL/TP)
+			protected.GET("/pending-orders", s.handlePendingOrders)
+			protected.POST("/pending-orders/cancel", s.handleCancelPendingOrder)
+			protected.POST("/pending-orders/cancel-all", s.handleCancelAllPendingOrders)
 			protected.GET("/decisions", s.handleDecisions)
 			protected.GET("/decisions/latest", s.handleLatestDecisions)
 			protected.GET("/statistics", s.handleStatistics)
@@ -2415,6 +2419,109 @@ func (s *Server) handleOpenOrders(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, openOrders)
+}
+
+// handlePendingOrders Get open limit orders tracked by AI (for dashboard)
+func (s *Server) handlePendingOrders(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+
+	orders, err := trader.GetOpenLimitOrdersSnapshot()
+	if err != nil {
+		SafeInternalError(c, "Get pending orders", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, orders)
+}
+
+// handleCancelPendingOrder Cancel a specific pending limit order
+func (s *Server) handleCancelPendingOrder(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+
+	var req struct {
+		Symbol   string `json:"symbol" binding:"required"`
+		OrderID  string `json:"order_id"`
+		ClientID string `json:"client_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SafeBadRequest(c, "Invalid request parameters")
+		return
+	}
+	if req.OrderID == "" && req.ClientID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order_id or client_id is required"})
+		return
+	}
+
+	symbol := market.Normalize(req.Symbol)
+	decision := &kernel.Decision{
+		Action:   "cancel_order",
+		Symbol:   symbol,
+		OrderID:  req.OrderID,
+		ClientID: req.ClientID,
+	}
+
+	if err := trader.ExecuteDecision(decision); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Order cancelled"})
+}
+
+// handleCancelAllPendingOrders Cancel all pending orders for a symbol
+func (s *Server) handleCancelAllPendingOrders(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		SafeBadRequest(c, "Invalid trader ID")
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return
+	}
+
+	var req struct {
+		Symbol string `json:"symbol" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SafeBadRequest(c, "Invalid request parameters")
+		return
+	}
+
+	symbol := market.Normalize(req.Symbol)
+	decision := &kernel.Decision{
+		Action: "cancel_all_orders",
+		Symbol: symbol,
+	}
+
+	if err := trader.ExecuteDecision(decision); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "All orders cancelled"})
 }
 
 // handleKlines K-line data (supports multiple exchanges via coinank)

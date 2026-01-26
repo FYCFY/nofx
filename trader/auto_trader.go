@@ -10,6 +10,7 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/store"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,22 @@ type AutoTraderConfig struct {
 	StrategyConfig *store.StrategyConfig // Strategy configuration (includes coin sources, indicators, risk control, prompts, etc.)
 }
 
+type pendingLimitOrder struct {
+	Key        string
+	OrderID    string
+	ClientID   string
+	Symbol     string
+	Side       string
+	Price      float64
+	Quantity   float64
+	Leverage   int
+	StopLoss   float64
+	TakeProfit float64
+	PostOnly   bool
+	ReduceOnly bool
+	CreatedAt  time.Time
+}
+
 // AutoTrader automatic trader
 type AutoTrader struct {
 	id                    string // Trader unique identifier
@@ -124,6 +141,8 @@ type AutoTrader struct {
 	lastBalanceSyncTime   time.Time          // Last balance sync time
 	userID                string             // User ID
 	gridState             *GridState         // Grid trading state (only used when StrategyType == "grid_trading")
+	pendingLimitOrders    map[string]*pendingLimitOrder
+	pendingLimitOrdersMu  sync.RWMutex
 }
 
 // NewAutoTrader creates an automatic trader
@@ -339,6 +358,8 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		peakPnLCacheMutex:     sync.RWMutex{},
 		lastBalanceSyncTime:   time.Now(),
 		userID:                userID,
+		pendingLimitOrders:    make(map[string]*pendingLimitOrder),
+		pendingLimitOrdersMu:  sync.RWMutex{},
 	}, nil
 }
 
@@ -501,6 +522,9 @@ func (at *AutoTrader) runCycle() error {
 		logger.Infof("⏹ Trader is stopped, aborting cycle #%d", at.callCount)
 		return nil
 	}
+
+	// Sync pending limit orders (set SL/TP after fill, clean up canceled orders)
+	at.syncPendingLimitOrders()
 
 	// Create decision record
 	record := &store.DecisionRecord{
@@ -830,7 +854,10 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 	}
 	logger.Infof("📋 [%s] Strategy engine fetched candidate coins: %d", at.name, len(candidateCoins))
 
-	// 4. Calculate total P&L
+	// 4. Collect pending limit orders for AI context
+	openOrders := at.collectOpenLimitOrders(positionInfos, candidateCoins)
+
+	// 5. Calculate total P&L
 	totalPnL := totalEquity - at.initialBalance
 	totalPnLPct := 0.0
 	if at.initialBalance > 0 {
@@ -842,13 +869,13 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		marginUsedPct = (totalMarginUsed / totalEquity) * 100
 	}
 
-	// 5. Get leverage from strategy config
+	// 6. Get leverage from strategy config
 	strategyConfig := at.strategyEngine.GetConfig()
 	btcEthLeverage := strategyConfig.RiskControl.BTCETHMaxLeverage
 	altcoinLeverage := strategyConfig.RiskControl.AltcoinMaxLeverage
 	logger.Infof("📋 [%s] Strategy leverage config: BTC/ETH=%dx, Altcoin=%dx", at.name, btcEthLeverage, altcoinLeverage)
 
-	// 6. Build context
+	// 7. Build context
 	ctx := &kernel.Context{
 		CurrentTime:     time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		RuntimeMinutes:  int(time.Since(at.startTime).Minutes()),
@@ -867,9 +894,10 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		},
 		Positions:      positionInfos,
 		CandidateCoins: candidateCoins,
+		OpenOrders:     openOrders,
 	}
 
-	// 7. Add recent closed trades (if store is available)
+	// 8. Add recent closed trades (if store is available)
 	if at.store != nil {
 		// Get recent 10 closed trades for AI context
 		recentTrades, err := at.store.Position().GetRecentTrades(at.id, 10)
@@ -927,7 +955,7 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		logger.Infof("⚠️ [%s] Store is nil, cannot get recent trades", at.name)
 	}
 
-	// 8. Get quantitative data (if enabled in strategy config)
+	// 9. Get quantitative data (if enabled in strategy config)
 	if strategyConfig.Indicators.EnableQuantData {
 		// Collect symbols to query (candidate coins + position coins)
 		symbolsToQuery := make(map[string]bool)
@@ -981,6 +1009,114 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 	return ctx, nil
 }
 
+func (at *AutoTrader) collectOpenLimitOrders(positions []kernel.PositionInfo, candidates []kernel.CandidateCoin) []kernel.PendingOrder {
+	symbolSet := make(map[string]bool)
+	for _, pos := range positions {
+		symbolSet[pos.Symbol] = true
+	}
+	for _, coin := range candidates {
+		symbolSet[coin.Symbol] = true
+	}
+	for _, pending := range at.listPendingLimitOrders() {
+		if pending.Symbol != "" {
+			symbolSet[pending.Symbol] = true
+		}
+	}
+
+	return at.collectOpenLimitOrdersForSymbols(symbolSet)
+}
+
+func (at *AutoTrader) collectOpenLimitOrdersForSymbols(symbolSet map[string]bool) []kernel.PendingOrder {
+	orders := make([]kernel.PendingOrder, 0)
+	seen := make(map[string]bool)
+
+	for symbol := range symbolSet {
+		openOrders, err := at.trader.GetOpenOrders(symbol)
+		if err != nil {
+			logger.Warnf("[%s] Failed to get open orders for %s: %v", at.name, symbol, err)
+			continue
+		}
+		for _, order := range openOrders {
+			if !isLimitOrderType(order.Type) {
+				continue
+			}
+			pending := kernel.PendingOrder{
+				OrderID:      order.OrderID,
+				Symbol:       order.Symbol,
+				Side:         order.Side,
+				PositionSide: order.PositionSide,
+				Type:         order.Type,
+				Price:        order.Price,
+				StopPrice:    order.StopPrice,
+				Quantity:     order.Quantity,
+			}
+
+			if meta := at.getPendingLimitOrder(order.OrderID); meta != nil {
+				pending.ClientID = meta.ClientID
+				pending.PostOnly = meta.PostOnly
+				pending.AgeSeconds = int64(time.Since(meta.CreatedAt).Seconds())
+			}
+
+			orders = append(orders, pending)
+			if order.OrderID != "" {
+				seen[order.OrderID] = true
+			}
+		}
+	}
+
+	for _, meta := range at.listPendingLimitOrders() {
+		if meta.OrderID != "" && seen[meta.OrderID] {
+			continue
+		}
+		positionSide := "LONG"
+		if strings.ToUpper(meta.Side) == "SELL" {
+			positionSide = "SHORT"
+		}
+		orders = append(orders, kernel.PendingOrder{
+			OrderID:      meta.OrderID,
+			ClientID:     meta.ClientID,
+			Symbol:       meta.Symbol,
+			Side:         meta.Side,
+			PositionSide: positionSide,
+			Type:         "LIMIT",
+			Price:        meta.Price,
+			Quantity:     meta.Quantity,
+			PostOnly:     meta.PostOnly,
+			AgeSeconds:   int64(time.Since(meta.CreatedAt).Seconds()),
+		})
+	}
+
+	return orders
+}
+
+func (at *AutoTrader) GetOpenLimitOrdersSnapshot() ([]kernel.PendingOrder, error) {
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get positions: %w", err)
+	}
+
+	symbolSet := make(map[string]bool)
+	for _, pos := range positions {
+		if symbol, ok := pos["symbol"].(string); ok && symbol != "" {
+			symbolSet[symbol] = true
+		}
+	}
+	for _, pending := range at.listPendingLimitOrders() {
+		if pending.Symbol != "" {
+			symbolSet[pending.Symbol] = true
+		}
+	}
+
+	return at.collectOpenLimitOrdersForSymbols(symbolSet), nil
+}
+
+func (at *AutoTrader) limitOrdersEnabled() bool {
+	if at.config.StrategyConfig == nil {
+		return true
+	}
+	return at.config.StrategyConfig.LimitOrdersEnabled()
+}
+
 // executeDecisionWithRecord executes AI decision and records detailed information
 func (at *AutoTrader) executeDecisionWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
 	switch decision.Action {
@@ -992,6 +1128,18 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *kernel.Decision, actio
 		return at.executeCloseLongWithRecord(decision, actionRecord)
 	case "close_short":
 		return at.executeCloseShortWithRecord(decision, actionRecord)
+	case "place_limit_buy":
+		return at.executePlaceLimitOrderWithRecord(decision, actionRecord, "BUY")
+	case "place_limit_sell":
+		return at.executePlaceLimitOrderWithRecord(decision, actionRecord, "SELL")
+	case "cancel_order":
+		return at.executeCancelOrderWithRecord(decision, actionRecord)
+	case "cancel_all_orders":
+		return at.executeCancelAllOrdersWithRecord(decision, actionRecord)
+	case "update_stop_loss":
+		return at.executeUpdateStopLossWithRecord(decision, actionRecord)
+	case "update_take_profit":
+		return at.executeUpdateTakeProfitWithRecord(decision, actionRecord)
 	case "hold", "wait":
 		// No execution needed, just record
 		return nil
@@ -1258,6 +1406,233 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 		logger.Infof("  ⚠ Failed to set take profit: %v", err)
 	}
 
+	return nil
+}
+
+func (at *AutoTrader) executePlaceLimitOrderWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction, side string) error {
+	logger.Infof("  🧾 Place limit %s: %s", strings.ToLower(side), decision.Symbol)
+
+	if !at.limitOrdersEnabled() {
+		return fmt.Errorf("limit order entry disabled by strategy config")
+	}
+
+	gridTrader, ok := at.trader.(GridTrader)
+	if !ok {
+		return fmt.Errorf("limit orders not supported by exchange: %s", at.exchange)
+	}
+
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return fmt.Errorf("failed to get positions: %w", err)
+	}
+
+	if err := at.enforceMaxPositions(len(positions)); err != nil {
+		return err
+	}
+
+	existingSide := "long"
+	if side == "SELL" {
+		existingSide = "short"
+	}
+	for _, pos := range positions {
+		if pos["symbol"] == decision.Symbol && pos["side"] == existingSide {
+			return fmt.Errorf("❌ %s already has %s position, close it first", decision.Symbol, existingSide)
+		}
+	}
+
+	if decision.Price <= 0 {
+		return fmt.Errorf("limit order price must be greater than 0")
+	}
+	if decision.Leverage <= 0 {
+		return fmt.Errorf("limit order leverage must be greater than 0")
+	}
+	if decision.StopLoss <= 0 || decision.TakeProfit <= 0 {
+		return fmt.Errorf("limit orders require stop loss and take profit")
+	}
+
+	if exists, id := at.hasOpenLimitOrder(decision.Symbol, side); exists {
+		return fmt.Errorf("❌ %s %s 已有未成交限价单(%s)，同方向仅允许一个", decision.Symbol, side, id)
+	}
+
+	balance, err := at.trader.GetBalance()
+	if err != nil {
+		return fmt.Errorf("failed to get account balance: %w", err)
+	}
+	availableBalance := 0.0
+	if avail, ok := balance["availableBalance"].(float64); ok {
+		availableBalance = avail
+	}
+
+	equity := 0.0
+	if eq, ok := balance["totalEquity"].(float64); ok && eq > 0 {
+		equity = eq
+	} else if eq, ok := balance["totalWalletBalance"].(float64); ok && eq > 0 {
+		equity = eq
+	} else {
+		equity = availableBalance
+	}
+
+	positionSizeUSD := decision.PositionSizeUSD
+	if decision.Quantity > 0 {
+		positionSizeUSD = decision.Quantity * decision.Price
+	}
+	if positionSizeUSD <= 0 {
+		return fmt.Errorf("position size must be greater than 0 for limit order")
+	}
+	decision.PositionSizeUSD = positionSizeUSD
+
+	adjustedPositionSize, wasCapped := at.enforcePositionValueRatio(positionSizeUSD, equity, decision.Symbol)
+	if wasCapped {
+		positionSizeUSD = adjustedPositionSize
+		decision.PositionSizeUSD = adjustedPositionSize
+	}
+
+	marginFactor := 1.01/float64(decision.Leverage) + 0.001
+	maxAffordablePositionSize := availableBalance / marginFactor
+	if positionSizeUSD > maxAffordablePositionSize {
+		adjustedSize := maxAffordablePositionSize * 0.98
+		logger.Infof("  ⚠️ Position size %.2f exceeds max affordable %.2f, auto-reducing to %.2f",
+			positionSizeUSD, maxAffordablePositionSize, adjustedSize)
+		positionSizeUSD = adjustedSize
+		decision.PositionSizeUSD = adjustedSize
+	}
+
+	if err := at.enforceMinPositionSize(positionSizeUSD); err != nil {
+		return err
+	}
+
+	quantity := positionSizeUSD / decision.Price
+	decision.Quantity = quantity
+
+	if err := at.trader.SetMarginMode(decision.Symbol, at.config.IsCrossMargin); err != nil {
+		logger.Infof("  ⚠️ Failed to set margin mode: %v", err)
+	}
+
+	clientID := decision.ClientID
+	if clientID == "" {
+		clientID = fmt.Sprintf("ai-limit-%d", time.Now().UnixNano()%1000000)
+	}
+
+	postOnly := decision.PostOnly
+	if !postOnly {
+		postOnly = true
+	}
+
+	req := &LimitOrderRequest{
+		Symbol:       decision.Symbol,
+		Side:         side,
+		PositionSide: strings.ToUpper(existingSide),
+		Price:        decision.Price,
+		Quantity:     quantity,
+		Leverage:     decision.Leverage,
+		PostOnly:     postOnly,
+		ReduceOnly:   decision.ReduceOnly,
+		ClientID:     clientID,
+	}
+
+	result, err := gridTrader.PlaceLimitOrder(req)
+	if err != nil {
+		return fmt.Errorf("failed to place limit order: %w", err)
+	}
+
+	actionRecord.Price = decision.Price
+	actionRecord.Quantity = quantity
+	actionRecord.Leverage = decision.Leverage
+	actionRecord.StopLoss = decision.StopLoss
+	actionRecord.TakeProfit = decision.TakeProfit
+
+	if result.OrderID != "" {
+		if id, err := strconv.ParseInt(result.OrderID, 10, 64); err == nil {
+			actionRecord.OrderID = id
+		}
+	}
+
+	at.recordPendingLimitOrder(result, req, decision.StopLoss, decision.TakeProfit)
+	logger.Infof("  ✓ Limit order placed: %s %s @ %.4f, qty=%.4f", decision.Symbol, side, decision.Price, quantity)
+
+	return nil
+}
+
+func (at *AutoTrader) executeCancelOrderWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
+	logger.Infof("  🧹 Cancel order: %s", decision.Symbol)
+
+	gridTrader, ok := at.trader.(GridTrader)
+	if !ok {
+		return fmt.Errorf("cancel order not supported by exchange: %s", at.exchange)
+	}
+
+	orderID := decision.OrderID
+	if orderID == "" && decision.ClientID != "" {
+		for _, pending := range at.listPendingLimitOrders() {
+			if pending.ClientID == decision.ClientID {
+				orderID = pending.OrderID
+				break
+			}
+		}
+	}
+	if orderID == "" {
+		return fmt.Errorf("cancel_order requires order_id or client_id")
+	}
+
+	if err := gridTrader.CancelOrder(decision.Symbol, orderID); err != nil {
+		return err
+	}
+
+	at.pendingLimitOrdersMu.Lock()
+	for key, pending := range at.pendingLimitOrders {
+		if pending.OrderID == orderID || (decision.ClientID != "" && pending.ClientID == decision.ClientID) {
+			delete(at.pendingLimitOrders, key)
+		}
+	}
+	at.pendingLimitOrdersMu.Unlock()
+
+	actionRecord.OrderID, _ = strconv.ParseInt(orderID, 10, 64)
+	return nil
+}
+
+func (at *AutoTrader) executeCancelAllOrdersWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
+	logger.Infof("  🧹 Cancel all orders: %s", decision.Symbol)
+
+	if err := at.trader.CancelAllOrders(decision.Symbol); err != nil {
+		return err
+	}
+
+	at.pendingLimitOrdersMu.Lock()
+	for key, pending := range at.pendingLimitOrders {
+		if pending.Symbol == decision.Symbol {
+			delete(at.pendingLimitOrders, key)
+		}
+	}
+	at.pendingLimitOrdersMu.Unlock()
+
+	return nil
+}
+
+func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
+	positionSide, qty, err := at.getPositionSideAndQuantity(decision)
+	if err != nil {
+		return err
+	}
+	if err := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, decision.Price); err != nil {
+		return err
+	}
+	actionRecord.Price = decision.Price
+	actionRecord.StopLoss = decision.Price
+	actionRecord.Quantity = qty
+	return nil
+}
+
+func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
+	positionSide, qty, err := at.getPositionSideAndQuantity(decision)
+	if err != nil {
+		return err
+	}
+	if err := at.trader.SetTakeProfit(decision.Symbol, positionSide, qty, decision.Price); err != nil {
+		return err
+	}
+	actionRecord.Price = decision.Price
+	actionRecord.TakeProfit = decision.Price
+	actionRecord.Quantity = qty
 	return nil
 }
 
@@ -1699,10 +2074,14 @@ func sortDecisionsByPriority(decisions []kernel.Decision) []kernel.Decision {
 		switch action {
 		case "close_long", "close_short":
 			return 1 // Highest priority: close positions first
-		case "open_long", "open_short":
-			return 2 // Second priority: open positions later
+		case "cancel_order", "cancel_all_orders":
+			return 2 // Cancel stale orders before opening new ones
+		case "open_long", "open_short", "place_limit_buy", "place_limit_sell":
+			return 3 // Open positions later
+		case "update_stop_loss", "update_take_profit":
+			return 4 // Update risk controls after open/cancel
 		case "hold", "wait":
-			return 3 // Lowest priority: wait
+			return 5 // Lowest priority: wait
 		default:
 			return 999 // Unknown actions at the end
 		}
@@ -2168,6 +2547,313 @@ func (at *AutoTrader) recordOrderFill(orderRecordID int64, exchangeOrderID, symb
 	}
 }
 
+func pendingLimitOrderKey(orderID, clientID, symbol string) string {
+	if orderID != "" {
+		return "oid:" + orderID
+	}
+	if clientID != "" {
+		return "cid:" + clientID
+	}
+	return fmt.Sprintf("sym:%s:%d", symbol, time.Now().UnixNano())
+}
+
+func (at *AutoTrader) recordPendingLimitOrder(result *LimitOrderResult, req *LimitOrderRequest, stopLoss, takeProfit float64) {
+	clientID := result.ClientID
+	if clientID == "" {
+		clientID = req.ClientID
+	}
+
+	key := pendingLimitOrderKey(result.OrderID, clientID, req.Symbol)
+	order := &pendingLimitOrder{
+		Key:        key,
+		OrderID:    result.OrderID,
+		ClientID:   clientID,
+		Symbol:     req.Symbol,
+		Side:       req.Side,
+		Price:      req.Price,
+		Quantity:   req.Quantity,
+		Leverage:   req.Leverage,
+		StopLoss:   stopLoss,
+		TakeProfit: takeProfit,
+		PostOnly:   req.PostOnly,
+		ReduceOnly: req.ReduceOnly,
+		CreatedAt:  time.Now().UTC(),
+	}
+
+	at.pendingLimitOrdersMu.Lock()
+	at.pendingLimitOrders[key] = order
+	at.pendingLimitOrdersMu.Unlock()
+}
+
+func (at *AutoTrader) removePendingLimitOrder(key string) {
+	at.pendingLimitOrdersMu.Lock()
+	delete(at.pendingLimitOrders, key)
+	at.pendingLimitOrdersMu.Unlock()
+}
+
+func (at *AutoTrader) listPendingLimitOrders() []*pendingLimitOrder {
+	at.pendingLimitOrdersMu.RLock()
+	defer at.pendingLimitOrdersMu.RUnlock()
+
+	orders := make([]*pendingLimitOrder, 0, len(at.pendingLimitOrders))
+	for _, order := range at.pendingLimitOrders {
+		orders = append(orders, order)
+	}
+	return orders
+}
+
+func (at *AutoTrader) getPendingLimitOrder(orderID string) *pendingLimitOrder {
+	if orderID == "" {
+		return nil
+	}
+	at.pendingLimitOrdersMu.RLock()
+	defer at.pendingLimitOrdersMu.RUnlock()
+
+	return at.pendingLimitOrders[pendingLimitOrderKey(orderID, "", "")]
+}
+
+func (at *AutoTrader) syncPendingLimitOrders() {
+	orders := at.listPendingLimitOrders()
+	if len(orders) == 0 {
+		return
+	}
+
+	for _, order := range orders {
+		if order.OrderID == "" {
+			logger.Warnf("[%s] Pending limit order missing order ID, removing: %s", at.name, order.Key)
+			at.removePendingLimitOrder(order.Key)
+			continue
+		}
+
+		status, err := at.trader.GetOrderStatus(order.Symbol, order.OrderID)
+		if err != nil {
+			logger.Warnf("[%s] Failed to query order status (%s): %v", at.name, order.OrderID, err)
+			openOrders, openErr := at.trader.GetOpenOrders(order.Symbol)
+			if openErr == nil {
+				stillOpen := false
+				for _, openOrder := range openOrders {
+					if openOrder.OrderID == order.OrderID {
+						stillOpen = true
+						break
+					}
+				}
+				if stillOpen {
+					continue
+				}
+			}
+			if qty, ok := at.findPositionQtyForSide(order.Symbol, order.Side); ok {
+				positionSide := "LONG"
+				if strings.ToUpper(order.Side) == "SELL" {
+					positionSide = "SHORT"
+				}
+				var setErr error
+				if order.StopLoss > 0 {
+					if err := at.trader.SetStopLoss(order.Symbol, positionSide, qty, order.StopLoss); err != nil {
+						setErr = err
+						logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
+					}
+				}
+				if order.TakeProfit > 0 {
+					if err := at.trader.SetTakeProfit(order.Symbol, positionSide, qty, order.TakeProfit); err != nil {
+						setErr = err
+						logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
+					}
+				}
+				if setErr == nil {
+					at.removePendingLimitOrder(order.Key)
+					logger.Infof("[%s] Pending limit order matched position, SL/TP set: %s %s", at.name, order.Symbol, order.OrderID)
+				}
+				continue
+			}
+
+			at.removePendingLimitOrder(order.Key)
+			continue
+		}
+
+		statusStr, _ := status["status"].(string)
+		statusStr = strings.ToUpper(statusStr)
+		switch statusStr {
+		case "FILLED":
+			execQty := order.Quantity
+			if qty, ok := status["executedQty"].(float64); ok && qty > 0 {
+				execQty = qty
+			} else if qtyStr, ok := status["executedQty"].(string); ok {
+				if qtyParsed, err := strconv.ParseFloat(qtyStr, 64); err == nil && qtyParsed > 0 {
+					execQty = qtyParsed
+				}
+			}
+
+			positionSide := "LONG"
+			if strings.ToUpper(order.Side) == "SELL" {
+				positionSide = "SHORT"
+			}
+
+			var setErr error
+			if order.StopLoss > 0 {
+				if err := at.trader.SetStopLoss(order.Symbol, positionSide, execQty, order.StopLoss); err != nil {
+					setErr = err
+					logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
+				}
+			}
+			if order.TakeProfit > 0 {
+				if err := at.trader.SetTakeProfit(order.Symbol, positionSide, execQty, order.TakeProfit); err != nil {
+					setErr = err
+					logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
+				}
+			}
+
+			if setErr == nil {
+				at.removePendingLimitOrder(order.Key)
+				logger.Infof("[%s] Pending limit order filled, SL/TP set: %s %s", at.name, order.Symbol, order.OrderID)
+			}
+		case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
+			at.removePendingLimitOrder(order.Key)
+			logger.Infof("[%s] Pending limit order closed: %s %s", at.name, order.Symbol, order.OrderID)
+		default:
+			continue
+		}
+	}
+}
+
+func isLimitOrderType(orderType string) bool {
+	orderType = strings.ToLower(orderType)
+	if strings.Contains(orderType, "limit") || strings.Contains(orderType, "post") {
+		return true
+	}
+	return false
+}
+
+func (at *AutoTrader) getPositionSideAndQuantity(decision *kernel.Decision) (string, float64, error) {
+	positionSide := strings.ToUpper(decision.PositionSide)
+	if positionSide != "" && positionSide != "LONG" && positionSide != "SHORT" {
+		return "", 0, fmt.Errorf("invalid position_side: %s", decision.PositionSide)
+	}
+
+	qty := decision.Quantity
+	if qty > 0 && positionSide != "" {
+		return positionSide, qty, nil
+	}
+
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to get positions: %w", err)
+	}
+
+	var matchedSide string
+	var matchedQty float64
+	for _, pos := range positions {
+		if pos["symbol"] != decision.Symbol {
+			continue
+		}
+		rawSide, ok := pos["side"].(string)
+		if !ok {
+			continue
+		}
+		side := ""
+		if rawSide == "long" {
+			side = "LONG"
+		} else if rawSide == "short" {
+			side = "SHORT"
+		}
+		if side == "" {
+			continue
+		}
+		if positionSide != "" && side != positionSide {
+			continue
+		}
+
+		if qtyVal, ok := pos["positionAmt"].(float64); ok {
+			if qtyVal < 0 {
+				qtyVal = -qtyVal
+			}
+			matchedQty = qtyVal
+		}
+
+		if matchedSide != "" && matchedSide != side {
+			return "", 0, fmt.Errorf("multiple position sides for %s, specify position_side", decision.Symbol)
+		}
+		matchedSide = side
+	}
+
+	if matchedSide == "" {
+		return "", 0, fmt.Errorf("no open position found for %s", decision.Symbol)
+	}
+
+	if qty <= 0 {
+		qty = matchedQty
+	}
+	if qty <= 0 {
+		return "", 0, fmt.Errorf("position quantity unavailable for %s", decision.Symbol)
+	}
+
+	return matchedSide, qty, nil
+}
+
+func (at *AutoTrader) findPositionQtyForSide(symbol, side string) (float64, bool) {
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return 0, false
+	}
+
+	targetSide := "long"
+	if strings.ToUpper(side) == "SELL" {
+		targetSide = "short"
+	}
+
+	for _, pos := range positions {
+		if pos["symbol"] != symbol {
+			continue
+		}
+		if posSide, ok := pos["side"].(string); ok && posSide == targetSide {
+			if qty, ok := pos["positionAmt"].(float64); ok {
+				if qty < 0 {
+					qty = -qty
+				}
+				if qty > 0 {
+					return qty, true
+				}
+			}
+		}
+	}
+
+	return 0, false
+}
+
+func (at *AutoTrader) hasOpenLimitOrder(symbol, side string) (bool, string) {
+	targetSide := strings.ToUpper(side)
+
+	for _, pending := range at.listPendingLimitOrders() {
+		if pending.Symbol == symbol && strings.ToUpper(pending.Side) == targetSide {
+			id := pending.OrderID
+			if id == "" {
+				id = pending.ClientID
+			}
+			return true, id
+		}
+	}
+
+	openOrders, err := at.trader.GetOpenOrders(symbol)
+	if err != nil {
+		logger.Warnf("[%s] Failed to get open orders for %s: %v", at.name, symbol, err)
+		return false, ""
+	}
+	for _, order := range openOrders {
+		if !isLimitOrderType(order.Type) {
+			continue
+		}
+		if strings.ToUpper(order.Side) != targetSide {
+			continue
+		}
+		id := order.OrderID
+		if id == "" {
+			id = order.Symbol
+		}
+		return true, id
+	}
+
+	return false, ""
+}
+
 // ============================================================================
 // Risk Control Helpers
 // ============================================================================
@@ -2267,4 +2953,3 @@ func getSideFromAction(action string) string {
 func (at *AutoTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 	return at.trader.GetOpenOrders(symbol)
 }
-

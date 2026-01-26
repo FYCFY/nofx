@@ -2138,6 +2138,9 @@ func (t *HyperliquidTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrder
 	isBuy := req.Side == "BUY"
 
 	logger.Infof("[Hyperliquid] PlaceLimitOrder: %s %s @ %.4f, qty=%.4f", coin, req.Side, roundedPrice, roundedQuantity)
+	if req.PostOnly {
+		logger.Warnf("[Hyperliquid] Post-only not supported, placing GTC limit order")
+	}
 
 	order := hyperliquid.CreateOrderRequest{
 		Coin:  coin,

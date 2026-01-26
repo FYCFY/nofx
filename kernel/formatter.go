@@ -79,7 +79,16 @@ func formatContextData(ctx *Context, lang Language) string {
 		}
 	}
 
-	// 6. 候选币种（带市场数据）
+	// 6. 未成交限价单
+	if len(ctx.OpenOrders) > 0 {
+		if lang == LangChinese {
+			sb.WriteString(formatOpenOrdersZH(ctx))
+		} else {
+			sb.WriteString(formatOpenOrdersEN(ctx))
+		}
+	}
+
+	// 7. 候选币种（带市场数据）
 	if len(ctx.CandidateCoins) > 0 {
 		if lang == LangChinese {
 			sb.WriteString(formatCandidateCoinsZH(ctx))
@@ -88,7 +97,7 @@ func formatContextData(ctx *Context, lang Language) string {
 		}
 	}
 
-	// 7. OI排名数据（如果有）
+	// 8. OI排名数据（如果有）
 	if ctx.OIRankingData != nil {
 		nofxosLang := nofxos.LangEnglish
 		if lang == LangChinese {
@@ -262,6 +271,37 @@ func formatCurrentPositionsZH(ctx *Context) string {
 		sb.WriteString("\n")
 	}
 
+	return sb.String()
+}
+
+// formatOpenOrdersZH formats pending limit orders (Chinese)
+func formatOpenOrdersZH(ctx *Context) string {
+	var sb strings.Builder
+	sb.WriteString("## 未成交限价单\n\n")
+
+	for i, order := range ctx.OpenOrders {
+		postOnly := "否"
+		if order.PostOnly {
+			postOnly = "是"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s %s | %s | 价格 %.4f | 数量 %.4f | post_only=%s",
+			i+1, order.Symbol, order.Side, order.Type, order.Price, order.Quantity, postOnly))
+		if order.StopPrice > 0 {
+			sb.WriteString(fmt.Sprintf(" | 触发价 %.4f", order.StopPrice))
+		}
+		if order.ClientID != "" {
+			sb.WriteString(fmt.Sprintf(" | CID %s", order.ClientID))
+		}
+		if order.OrderID != "" {
+			sb.WriteString(fmt.Sprintf(" | ID %s", order.OrderID))
+		}
+		if order.AgeSeconds > 0 {
+			sb.WriteString(fmt.Sprintf(" | 已挂单 %d min", order.AgeSeconds/60))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n")
 	return sb.String()
 }
 
@@ -528,6 +568,37 @@ func formatCurrentPositionsEN(ctx *Context) string {
 		sb.WriteString("\n")
 	}
 
+	return sb.String()
+}
+
+// formatOpenOrdersEN formats pending limit orders (English)
+func formatOpenOrdersEN(ctx *Context) string {
+	var sb strings.Builder
+	sb.WriteString("## Pending Limit Orders\n\n")
+
+	for i, order := range ctx.OpenOrders {
+		postOnly := "no"
+		if order.PostOnly {
+			postOnly = "yes"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s %s | %s | Price %.4f | Qty %.4f | post_only=%s",
+			i+1, order.Symbol, order.Side, order.Type, order.Price, order.Quantity, postOnly))
+		if order.StopPrice > 0 {
+			sb.WriteString(fmt.Sprintf(" | Stop %.4f", order.StopPrice))
+		}
+		if order.ClientID != "" {
+			sb.WriteString(fmt.Sprintf(" | CID %s", order.ClientID))
+		}
+		if order.OrderID != "" {
+			sb.WriteString(fmt.Sprintf(" | ID %s", order.OrderID))
+		}
+		if order.AgeSeconds > 0 {
+			sb.WriteString(fmt.Sprintf(" | Age %d min", order.AgeSeconds/60))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n")
 	return sb.String()
 }
 

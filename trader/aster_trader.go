@@ -1493,12 +1493,17 @@ func (t *AsterTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderResult
 		side = "SELL"
 	}
 
+	timeInForce := "GTC"
+	if req.PostOnly {
+		timeInForce = "GTX"
+	}
+
 	params := map[string]interface{}{
 		"symbol":       req.Symbol,
 		"positionSide": "BOTH",
 		"type":         "LIMIT",
 		"side":         side,
-		"timeInForce":  "GTC",
+		"timeInForce":  timeInForce,
 		"quantity":     qtyStr,
 		"price":        priceStr,
 	}

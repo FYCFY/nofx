@@ -1520,15 +1520,25 @@ func (t *OKXTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderResult, 
 		posSide = "short"
 	}
 
+	ordType := "limit"
+	if req.PostOnly {
+		ordType = "post_only"
+	}
+
+	clientID := req.ClientID
+	if clientID == "" {
+		clientID = genOkxClOrdID()
+	}
+
 	body := map[string]interface{}{
 		"instId":  instId,
 		"tdMode":  "cross",
 		"side":    side,
 		"posSide": posSide,
-		"ordType": "limit",
+		"ordType": ordType,
 		"sz":      szStr,
 		"px":      fmt.Sprintf("%.8f", req.Price),
-		"clOrdId": genOkxClOrdID(),
+		"clOrdId": clientID,
 		"tag":     okxTag,
 	}
 

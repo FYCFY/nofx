@@ -56,6 +56,14 @@ export const translations = {
     short: 'SHORT',
     noPositions: 'No Positions',
     noActivePositions: 'No active trading positions',
+    pendingOrders: 'Pending Orders',
+    noPendingOrders: 'No Pending Orders',
+    orderPrice: 'Price',
+    orderType: 'Type',
+    orderAge: 'Age',
+    orderId: 'Order ID',
+    postOnly: 'Post-only',
+    cancelOrder: 'Cancel',
 
     // Recent Decisions
     recentDecisions: 'Recent Decisions',
@@ -1265,6 +1273,14 @@ export const translations = {
     short: '空头',
     noPositions: '无持仓',
     noActivePositions: '当前没有活跃的交易持仓',
+    pendingOrders: '挂单跟踪',
+    noPendingOrders: '暂无挂单',
+    orderPrice: '价格',
+    orderType: '类型',
+    orderAge: '时长',
+    orderId: '订单ID',
+    postOnly: '只挂单',
+    cancelOrder: '撤销',
 
     // Recent Decisions
     recentDecisions: '最近决策',

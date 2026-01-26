@@ -42,6 +42,20 @@ export interface Position {
   margin_used: number
 }
 
+export interface PendingOrder {
+  order_id: string
+  client_id?: string
+  symbol: string
+  side: string
+  position_side?: string
+  type: string
+  price?: number
+  stop_price?: number
+  quantity?: number
+  post_only?: boolean
+  age_seconds?: number
+}
+
 export interface DecisionAction {
   action: string
   symbol: string
@@ -473,6 +487,7 @@ export interface StrategyConfig {
   indicators: IndicatorConfig;
   custom_prompt?: string;
   risk_control: RiskControlConfig;
+  enable_limit_orders?: boolean;
   prompt_sections?: PromptSectionsConfig;
   // Grid trading configuration (only used when strategy_type is 'grid_trading')
   grid_config?: GridStrategyConfig;

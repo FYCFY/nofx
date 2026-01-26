@@ -46,11 +46,21 @@ type StrategyConfig struct {
 	CustomPrompt string `json:"custom_prompt,omitempty"`
 	// risk control configuration
 	RiskControl RiskControlConfig `json:"risk_control"`
+	// limit order entry (non-grid) switch, defaults to true when omitted
+	EnableLimitOrders *bool `json:"enable_limit_orders,omitempty"`
 	// editable sections of System Prompt
 	PromptSections PromptSectionsConfig `json:"prompt_sections,omitempty"`
 
 	// Grid trading configuration (only used when StrategyType == "grid_trading")
 	GridConfig *GridStrategyConfig `json:"grid_config,omitempty"`
+}
+
+// LimitOrdersEnabled returns true when limit order entry is enabled or unspecified.
+func (c *StrategyConfig) LimitOrdersEnabled() bool {
+	if c == nil || c.EnableLimitOrders == nil {
+		return true
+	}
+	return *c.EnableLimitOrders
 }
 
 // GridStrategyConfig grid trading specific configuration
@@ -244,6 +254,7 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 	if lang == "zh" {
 		normalizedLang = "zh"
 	}
+	enableLimitOrders := true
 
 	config := StrategyConfig{
 		Language: normalizedLang,
@@ -308,6 +319,7 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			MinRiskRewardRatio:              3.0, // Min 3:1 profit/loss ratio (AI guided)
 			MinConfidence:                   75,  // Min 75% confidence (AI guided)
 		},
+		EnableLimitOrders: &enableLimitOrders,
 	}
 
 	if lang == "zh" {

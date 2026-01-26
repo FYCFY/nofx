@@ -1142,6 +1142,10 @@ func (t *BybitTrader) PlaceLimitOrder(req *LimitOrderRequest) (*LimitOrderResult
 		"positionIdx": 0,     // One-way position mode
 	}
 
+	if req.PostOnly {
+		params["timeInForce"] = "PostOnly"
+	}
+
 	// Add reduce only if specified
 	if req.ReduceOnly {
 		params["reduceOnly"] = true
