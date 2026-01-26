@@ -1023,6 +1023,14 @@ func (at *AutoTrader) collectOpenLimitOrders(positions []kernel.PositionInfo, ca
 		}
 	}
 
+	if allGetter, ok := at.trader.(OpenOrdersAllGetter); ok {
+		openOrders, err := allGetter.GetOpenOrdersAll()
+		if err == nil {
+			return at.collectOpenLimitOrdersFromExchange(openOrders)
+		}
+		logger.Warnf("[%s] Failed to get all open orders: %v", at.name, err)
+	}
+
 	return at.collectOpenLimitOrdersForSymbols(symbolSet)
 }
 
@@ -1047,7 +1055,9 @@ func (at *AutoTrader) collectOpenLimitOrdersFromExchange(openOrders []OpenOrder)
 
 	for _, order := range openOrders {
 		if !isLimitOrderType(order.Type) {
-			continue
+			if order.Price <= 0 || order.StopPrice > 0 {
+				continue
+			}
 		}
 		pending := kernel.PendingOrder{
 			OrderID:      order.OrderID,

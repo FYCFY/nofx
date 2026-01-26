@@ -1170,6 +1170,7 @@ func (e *StrategyEngine) writeAvailableIndicators(sb *strings.Builder) {
 // BuildUserPrompt builds User Prompt based on strategy configuration
 func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 	var sb strings.Builder
+	lang := e.GetLanguage()
 
 	// System status
 	sb.WriteString(fmt.Sprintf("Time: %s | Period: #%d | Runtime: %d minutes\n\n",
@@ -1210,9 +1211,6 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 
 	// Historical trading statistics (helps AI understand past performance)
 	if ctx.TradingStats != nil && ctx.TradingStats.TotalTrades > 0 {
-		// Get language from strategy config
-		lang := e.GetLanguage()
-
 		// Win/Loss ratio
 		var winLossRatio float64
 		if ctx.TradingStats.AvgLoss > 0 {
@@ -1277,6 +1275,21 @@ func (e *StrategyEngine) BuildUserPrompt(ctx *Context) string {
 		}
 	} else {
 		sb.WriteString("Current Positions: None\n\n")
+	}
+
+	// Pending limit orders
+	if len(ctx.OpenOrders) > 0 {
+		if lang == LangChinese {
+			sb.WriteString(formatOpenOrdersZH(ctx))
+		} else {
+			sb.WriteString(formatOpenOrdersEN(ctx))
+		}
+	} else {
+		if lang == LangChinese {
+			sb.WriteString("未成交限价单: 无\n\n")
+		} else {
+			sb.WriteString("Open Orders: None\n\n")
+		}
 	}
 
 	// Candidate coins (exclude coins already in positions to avoid duplicate data)
