@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"nofx/logger"
 	"nofx/market"
+	"nofx/notify"
 	"nofx/store"
 	"sort"
 	"strconv"
@@ -179,6 +180,10 @@ func (t *BybitTrader) SyncOrdersFromBybit(traderID string, exchangeID string, ex
 	if st == nil {
 		return fmt.Errorf("store is nil")
 	}
+	userID := ""
+	if traderCfg, err := st.Trader().GetByID(traderID); err == nil && traderCfg != nil {
+		userID = traderCfg.UserID
+	}
 
 	// Get recent trades (last 24 hours)
 	startTime := time.Now().Add(-24 * time.Hour)
@@ -286,6 +291,18 @@ func (t *BybitTrader) SyncOrdersFromBybit(traderID string, exchangeID string, ex
 			logger.Infof("  ⚠️ Failed to sync position for trade %s: %v", trade.ExecID, err)
 		} else {
 			logger.Infof("  📍 Position updated for trade: %s (action: %s, qty: %.6f)", trade.ExecID, trade.OrderAction, trade.ExecQty)
+		}
+
+		if userID != "" {
+			notify.NotifyCloseTrade(userID, traderID, notify.TradeInfo{
+				Symbol:      symbol,
+				OrderAction: trade.OrderAction,
+				Side:        side,
+				Price:       trade.ExecPrice,
+				Quantity:    trade.ExecQty,
+				RealizedPnL: trade.ClosedPnL,
+				Time:        trade.ExecTime.UTC(),
+			})
 		}
 
 		syncedCount++

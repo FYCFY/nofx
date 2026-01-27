@@ -19,6 +19,8 @@ import type {
     Statistics,
     TraderInfo,
     Exchange,
+    TelegramConfig,
+    TraderNotifyRule,
 } from '../types'
 
 // --- Helper Functions ---
@@ -150,6 +152,15 @@ export function TraderDashboardPage({
     const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([])
     const [pendingOrdersLoading, setPendingOrdersLoading] = useState<boolean>(false)
     const [cancelingOrderId, setCancelingOrderId] = useState<string | null>(null)
+    const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>({ enabled: false })
+    const [telegramBotTokenInput, setTelegramBotTokenInput] = useState<string>('')
+    const [telegramLoading, setTelegramLoading] = useState<boolean>(false)
+    const [telegramSaving, setTelegramSaving] = useState<boolean>(false)
+    const [notifyRule, setNotifyRule] = useState<TraderNotifyRule>({
+        target_equity: 0,
+        trigger_mode: 'once',
+    })
+    const [notifySaving, setNotifySaving] = useState<boolean>(false)
 
     // Calculate paginated positions
     const totalPositions = positions?.length || 0
@@ -195,6 +206,47 @@ export function TraderDashboardPage({
         return () => {
             isActive = false
             clearInterval(intervalId)
+        }
+    }, [selectedTraderId])
+
+    useEffect(() => {
+        if (!selectedTraderId) return
+        let isActive = true
+
+        const loadTelegramConfig = async () => {
+            setTelegramLoading(true)
+            try {
+                const cfg = await api.getTelegramConfig()
+                if (isActive) {
+                    setTelegramConfig(cfg || { enabled: false })
+                    setTelegramBotTokenInput('')
+                }
+            } catch (err) {
+                if (isActive) {
+                    console.error('Failed to load telegram config:', err)
+                }
+            } finally {
+                if (isActive) setTelegramLoading(false)
+            }
+        }
+
+        const loadNotifyRule = async () => {
+            try {
+                const rule = await api.getTraderNotifyRule(selectedTraderId)
+                if (isActive && rule) {
+                    setNotifyRule(rule)
+                }
+            } catch (err) {
+                if (isActive) {
+                    console.error('Failed to load notify rule:', err)
+                }
+            }
+        }
+
+        loadTelegramConfig()
+        loadNotifyRule()
+        return () => {
+            isActive = false
         }
     }, [selectedTraderId])
 
@@ -317,6 +369,53 @@ export function TraderDashboardPage({
             notify.error(errorMsg)
         } finally {
             setCancelingOrderId(null)
+        }
+    }
+
+    const handleSaveTelegramConfig = async () => {
+        if (!selectedTraderId) return
+        setTelegramSaving(true)
+        try {
+            const payload: any = {
+                enabled: !!telegramConfig.enabled,
+                chat_id: telegramConfig.chat_id || '',
+                default_trader_id: selectedTraderId,
+            }
+            const token = telegramBotTokenInput.trim()
+            if (token) {
+                payload.bot_token = token
+            }
+            await api.updateTelegramConfig(payload)
+            notify.success('Telegram 配置已保存')
+            const cfg = await api.getTelegramConfig()
+            setTelegramConfig(cfg || { enabled: false })
+            setTelegramBotTokenInput('')
+        } catch (err: any) {
+            notify.error(err?.message || '保存 Telegram 配置失败')
+        } finally {
+            setTelegramSaving(false)
+        }
+    }
+
+    const handleTestTelegram = async () => {
+        try {
+            await api.testTelegram()
+            notify.success('测试消息已发送')
+        } catch (err: any) {
+            notify.error(err?.message || '发送测试消息失败')
+        }
+    }
+
+    const handleSaveNotifyRule = async () => {
+        if (!selectedTraderId) return
+        setNotifySaving(true)
+        try {
+            await api.updateTraderNotifyRule(selectedTraderId, notifyRule)
+            notify.success('通知规则已保存')
+        } catch (err: any) {
+            notify.error(err?.message || '保存通知规则失败')
+        } finally {
+            setNotifySaving(false)
         }
     }
 
@@ -1038,6 +1137,124 @@ export function TraderDashboardPage({
                             </h2>
                         </div>
                         <PositionHistory traderId={selectedTraderId} />
+                    </div>
+                )}
+
+                {selectedTraderId && (
+                    <div
+                        className="nofx-glass p-6 animate-slide-in"
+                        style={{ animationDelay: '0.3s' }}
+                    >
+                        <div className="flex items-center justify-between mb-6">
+                            <h2 className="text-xl font-bold flex items-center gap-2 text-nofx-text-main">
+                                <span className="text-2xl">📲</span>
+                                Telegram 通知
+                            </h2>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div className="space-y-4">
+                                <div className="text-sm text-nofx-text-muted">机器人配置（保存后自动启动）</div>
+                                <div className="flex items-center gap-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={!!telegramConfig.enabled}
+                                        onChange={(e) =>
+                                            setTelegramConfig((prev) => ({ ...prev, enabled: e.target.checked }))
+                                        }
+                                    />
+                                    <span className="text-sm text-nofx-text-main">启用 Telegram 通知</span>
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-nofx-text-muted mb-1">Bot Token</label>
+                                    <input
+                                        type="password"
+                                        placeholder={telegramConfig.bot_token_set ? '已设置，输入可更新' : '请输入 Bot Token'}
+                                        value={telegramBotTokenInput}
+                                        onChange={(e) => setTelegramBotTokenInput(e.target.value)}
+                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-nofx-text-muted mb-1">Chat ID</label>
+                                    <input
+                                        type="text"
+                                        placeholder="例如：123456789"
+                                        value={telegramConfig.chat_id || ''}
+                                        onChange={(e) =>
+                                            setTelegramConfig((prev) => ({ ...prev, chat_id: e.target.value }))
+                                        }
+                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
+                                    />
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={handleSaveTelegramConfig}
+                                        disabled={telegramSaving || telegramLoading}
+                                        className="px-4 py-2 rounded bg-nofx-gold/20 text-nofx-gold border border-nofx-gold/40 text-sm font-semibold hover:bg-nofx-gold/30 transition-colors disabled:opacity-50"
+                                    >
+                                        {telegramSaving ? '保存中...' : '保存配置'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleTestTelegram}
+                                        disabled={telegramLoading}
+                                        className="px-4 py-2 rounded bg-white/5 text-nofx-text-main border border-white/10 text-sm font-semibold hover:bg-white/10 transition-colors disabled:opacity-50"
+                                    >
+                                        发送测试消息
+                                    </button>
+                                </div>
+                                {telegramLoading && (
+                                    <div className="text-xs text-nofx-text-muted">加载配置中...</div>
+                                )}
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="text-sm text-nofx-text-muted">净值目标提醒</div>
+                                <div>
+                                    <label className="block text-xs text-nofx-text-muted mb-1">目标净值 (USDT)</label>
+                                    <input
+                                        type="number"
+                                        value={notifyRule.target_equity || 0}
+                                        onChange={(e) =>
+                                            setNotifyRule((prev) => ({
+                                                ...prev,
+                                                target_equity: Number(e.target.value || 0),
+                                            }))
+                                        }
+                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-nofx-text-muted mb-1">触发模式</label>
+                                    <select
+                                        value={notifyRule.trigger_mode}
+                                        onChange={(e) =>
+                                            setNotifyRule((prev) => ({
+                                                ...prev,
+                                                trigger_mode: e.target.value as any,
+                                            }))
+                                        }
+                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
+                                    >
+                                        <option value="once">单次触发</option>
+                                        <option value="cross">穿越触发</option>
+                                    </select>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleSaveNotifyRule}
+                                    disabled={notifySaving}
+                                    className="px-4 py-2 rounded bg-nofx-gold/20 text-nofx-gold border border-nofx-gold/40 text-sm font-semibold hover:bg-nofx-gold/30 transition-colors disabled:opacity-50"
+                                >
+                                    {notifySaving ? '保存中...' : '保存规则'}
+                                </button>
+                                <div className="text-xs text-nofx-text-muted">
+                                    目标净值达到后推送提醒（>= 目标值）。
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>

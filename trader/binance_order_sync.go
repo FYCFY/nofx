@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"nofx/logger"
 	"nofx/market"
+	"nofx/notify"
 	"nofx/store"
 	"sort"
 	"strings"
@@ -26,6 +27,10 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 	}
 
 	orderStore := st.Order()
+	userID := ""
+	if traderCfg, err := st.Trader().GetByID(traderID); err == nil && traderCfg != nil {
+		userID = traderCfg.UserID
+	}
 
 	// Get last sync time (Unix ms) - first try memory, then database, then default
 	binanceSyncStateMutex.RLock()
@@ -263,6 +268,18 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 			logger.Infof("  ⚠️ Failed to sync position for trade %s: %v", trade.TradeID, err)
 		} else {
 			logger.Infof("  📍 Position updated for trade: %s (action: %s, qty: %.6f)", trade.TradeID, orderAction, trade.Quantity)
+		}
+
+		if userID != "" {
+			notify.NotifyCloseTrade(userID, traderID, notify.TradeInfo{
+				Symbol:      symbol,
+				OrderAction: orderAction,
+				Side:        side,
+				Price:       trade.Price,
+				Quantity:    trade.Quantity,
+				RealizedPnL: trade.RealizedPnL,
+				Time:        trade.Time.UTC(),
+			})
 		}
 
 		syncedCount++

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"nofx/logger"
 	"nofx/market"
+	"nofx/notify"
 	"nofx/store"
 	"sort"
 	"strings"
@@ -17,6 +18,10 @@ import (
 func (t *AsterTrader) SyncOrdersFromAster(traderID string, exchangeID string, exchangeType string, st *store.Store) error {
 	if st == nil {
 		return fmt.Errorf("store is nil")
+	}
+	userID := ""
+	if traderCfg, err := st.Trader().GetByID(traderID); err == nil && traderCfg != nil {
+		userID = traderCfg.UserID
 	}
 
 	// Get recent trades (last 24 hours)
@@ -131,6 +136,18 @@ func (t *AsterTrader) SyncOrdersFromAster(traderID string, exchangeID string, ex
 			logger.Infof("  ⚠️ Failed to sync position for trade %s: %v", trade.TradeID, err)
 		} else {
 			logger.Infof("  📍 Position updated for trade: %s (action: %s, qty: %.6f)", trade.TradeID, orderAction, trade.Quantity)
+		}
+
+		if userID != "" {
+			notify.NotifyCloseTrade(userID, traderID, notify.TradeInfo{
+				Symbol:      symbol,
+				OrderAction: orderAction,
+				Side:        side,
+				Price:       trade.Price,
+				Quantity:    trade.Quantity,
+				RealizedPnL: trade.RealizedPnL,
+				Time:        trade.Time.UTC(),
+			})
 		}
 
 		syncedCount++

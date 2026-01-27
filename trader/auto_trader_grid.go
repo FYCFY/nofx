@@ -7,6 +7,7 @@ import (
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
+	"nofx/notify"
 	"nofx/store"
 	"sync"
 	"time"
@@ -32,16 +33,16 @@ type GridState struct {
 	GridSpacing float64
 
 	// State flags
-	IsPaused    bool
+	IsPaused      bool
 	IsInitialized bool
 
 	// Performance tracking
-	TotalProfit   float64
-	TotalTrades   int
-	WinningTrades int
-	MaxDrawdown   float64
-	PeakEquity    float64
-	DailyPnL      float64
+	TotalProfit    float64
+	TotalTrades    int
+	WinningTrades  int
+	MaxDrawdown    float64
+	PeakEquity     float64
+	DailyPnL       float64
 	LastDailyReset time.Time
 
 	// Order tracking
@@ -643,6 +644,9 @@ func (at *AutoTrader) RunGridCycle() error {
 	if err != nil {
 		return fmt.Errorf("failed to build grid context: %w", err)
 	}
+	if gridCtx.TotalEquity > 0 {
+		notify.CheckEquityTarget(at.userID, at.id, gridCtx.TotalEquity)
+	}
 
 	// Get AI decisions
 	decision, err := kernel.GetGridDecisions(gridCtx, at.mcpClient, gridConfig, lang)
@@ -1067,6 +1071,11 @@ func (at *AutoTrader) syncGridState() {
 					level.PositionEntry = level.Price
 					level.PositionSize = level.OrderQuantity
 					at.gridState.TotalTrades++
+					side := "BUY"
+					if level.Side == "sell" {
+						side = "SELL"
+					}
+					notify.NotifyLimitFill(at.userID, at.id, gridConfig.Symbol, side, level.Price, level.OrderQuantity)
 					logger.Infof("[Grid] Level %d order filled at $%.2f", i, level.Price)
 				} else {
 					// Position didn't increase as expected, likely cancelled

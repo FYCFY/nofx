@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"nofx/logger"
 	"nofx/market"
+	"nofx/notify"
 	"nofx/store"
 	"sort"
 	"strconv"
@@ -130,6 +131,10 @@ func (t *BitgetTrader) SyncOrdersFromBitget(traderID string, exchangeID string, 
 	if st == nil {
 		return fmt.Errorf("store is nil")
 	}
+	userID := ""
+	if traderCfg, err := st.Trader().GetByID(traderID); err == nil && traderCfg != nil {
+		userID = traderCfg.UserID
+	}
 
 	// Get recent trades (last 24 hours)
 	startTime := time.Now().Add(-24 * time.Hour)
@@ -237,6 +242,18 @@ func (t *BitgetTrader) SyncOrdersFromBitget(traderID string, exchangeID string, 
 			logger.Infof("  ⚠️ Failed to sync position for trade %s: %v", trade.TradeID, err)
 		} else {
 			logger.Infof("  📍 Position updated for trade: %s (action: %s, qty: %.6f)", trade.TradeID, trade.OrderAction, trade.FillQty)
+		}
+
+		if userID != "" {
+			notify.NotifyCloseTrade(userID, traderID, notify.TradeInfo{
+				Symbol:      symbol,
+				OrderAction: trade.OrderAction,
+				Side:        side,
+				Price:       trade.FillPrice,
+				Quantity:    trade.FillQty,
+				RealizedPnL: trade.ProfitLoss,
+				Time:        trade.ExecTime.UTC(),
+			})
 		}
 
 		syncedCount++

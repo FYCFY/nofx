@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"nofx/kernel"
 	"nofx/experience"
+	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/mcp"
+	"nofx/notify"
 	"nofx/store"
 	"strconv"
 	"strings"
@@ -36,13 +37,13 @@ type AutoTraderConfig struct {
 	BybitSecretKey string
 
 	// OKX API configuration
-	OKXAPIKey    string
-	OKXSecretKey string
+	OKXAPIKey     string
+	OKXSecretKey  string
 	OKXPassphrase string
 
 	// Bitget API configuration
-	BitgetAPIKey    string
-	BitgetSecretKey string
+	BitgetAPIKey     string
+	BitgetSecretKey  string
 	BitgetPassphrase string
 
 	// Hyperliquid configuration
@@ -120,9 +121,9 @@ type AutoTrader struct {
 	config                AutoTraderConfig
 	trader                Trader // Use Trader interface (supports multiple platforms)
 	mcpClient             mcp.AIClient
-	store                 *store.Store             // Data storage (decision records, etc.)
+	store                 *store.Store           // Data storage (decision records, etc.)
 	strategyEngine        *kernel.StrategyEngine // Strategy engine (uses strategy configuration)
-	cycleNumber           int                      // Current cycle number
+	cycleNumber           int                    // Current cycle number
 	initialBalance        float64
 	dailyPnL              float64
 	customPrompt          string // Custom trading strategy prompt
@@ -557,6 +558,7 @@ func (at *AutoTrader) runCycle() error {
 		at.saveDecision(record)
 		return fmt.Errorf("failed to build trading context: %w", err)
 	}
+	notify.CheckEquityTarget(at.userID, at.id, ctx.Account.TotalEquity)
 
 	// 如果没有候选币种，友好提示并跳过本周期
 	if len(ctx.CandidateCoins) == 0 {
@@ -2545,22 +2547,22 @@ func (at *AutoTrader) recordOrderFill(orderRecordID int64, exchangeOrderID, symb
 	normalizedSymbol := market.Normalize(symbol)
 
 	fill := &store.TraderFill{
-		TraderID:         at.id,
-		ExchangeID:       at.exchangeID,
-		ExchangeType:     at.exchange,
-		OrderID:          orderRecordID,
-		ExchangeOrderID:  exchangeOrderID,
-		ExchangeTradeID:  tradeID,
-		Symbol:           normalizedSymbol,
-		Side:             side,
-		Price:            price,
-		Quantity:         quantity,
-		QuoteQuantity:    price * quantity,
-		Commission:       fee,
-		CommissionAsset:  "USDT",
-		RealizedPnL:      0, // Will be calculated for close orders
-		IsMaker:          false, // Market orders are usually taker
-		CreatedAt:        time.Now().UTC().UnixMilli(),
+		TraderID:        at.id,
+		ExchangeID:      at.exchangeID,
+		ExchangeType:    at.exchange,
+		OrderID:         orderRecordID,
+		ExchangeOrderID: exchangeOrderID,
+		ExchangeTradeID: tradeID,
+		Symbol:          normalizedSymbol,
+		Side:            side,
+		Price:           price,
+		Quantity:        quantity,
+		QuoteQuantity:   price * quantity,
+		Commission:      fee,
+		CommissionAsset: "USDT",
+		RealizedPnL:     0,     // Will be calculated for close orders
+		IsMaker:         false, // Market orders are usually taker
+		CreatedAt:       time.Now().UTC().UnixMilli(),
 	}
 
 	// Calculate realized PnL for close orders
@@ -2761,6 +2763,7 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 					logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
 				}
 				if setErr == nil {
+					notify.NotifyLimitFill(at.userID, at.id, order.Symbol, order.Side, order.Price, qty)
 					at.removePendingLimitOrder(order.Key)
 					logger.Infof("[%s] Pending limit order matched position, SL/TP set: %s %s", at.name, order.Symbol, order.OrderID)
 				}
@@ -2800,6 +2803,7 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 			}
 
 			if setErr == nil {
+				notify.NotifyLimitFill(at.userID, at.id, order.Symbol, order.Side, order.Price, execQty)
 				at.removePendingLimitOrder(order.Key)
 				logger.Infof("[%s] Pending limit order filled, SL/TP set: %s %s", at.name, order.Symbol, order.OrderID)
 			}

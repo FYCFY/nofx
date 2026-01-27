@@ -194,6 +194,27 @@ export interface CreateTraderRequest {
   use_oi_top?: boolean
 }
 
+export interface TelegramConfig {
+  enabled: boolean
+  bot_token?: string
+  bot_token_set?: boolean
+  chat_id?: string
+  default_trader_id?: string
+}
+
+export interface TelegramConfigUpdateRequest {
+  enabled: boolean
+  bot_token?: string
+  chat_id?: string
+  default_trader_id?: string
+}
+
+export interface TraderNotifyRule {
+  target_equity: number
+  trigger_mode: 'once' | 'cross'
+  triggered?: boolean
+}
+
 export interface UpdateModelConfigRequest {
   models: {
     [key: string]: {

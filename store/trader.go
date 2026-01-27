@@ -110,11 +110,11 @@ func (s *TraderStore) Update(trader *Trader) error {
 		trader.ID, trader.Name, trader.AIModelID, trader.StrategyID)
 
 	updates := map[string]interface{}{
-		"name":           trader.Name,
-		"ai_model_id":    trader.AIModelID,
-		"exchange_id":    trader.ExchangeID,
-		"strategy_id":    trader.StrategyID,
-		"is_cross_margin": trader.IsCrossMargin,
+		"name":                trader.Name,
+		"ai_model_id":         trader.AIModelID,
+		"exchange_id":         trader.ExchangeID,
+		"strategy_id":         trader.StrategyID,
+		"is_cross_margin":     trader.IsCrossMargin,
 		"show_in_competition": trader.ShowInCompetition,
 	}
 
@@ -198,6 +198,19 @@ func (s *TraderStore) GetFullConfig(userID, traderID string) (*TraderFullConfig,
 		Exchange: &exchange,
 		Strategy: strategy,
 	}, nil
+}
+
+// GetByID gets trader by ID (no user filter)
+func (s *TraderStore) GetByID(traderID string) (*Trader, error) {
+	var trader Trader
+	err := s.db.Where("id = ?", traderID).First(&trader).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &trader, nil
 }
 
 // getStrategyByID internal method: gets strategy by ID

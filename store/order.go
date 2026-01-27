@@ -37,9 +37,9 @@ type TraderOrder struct {
 	PriceProtect      bool    `gorm:"column:price_protect;default:false" json:"price_protect"`
 	OrderAction       string  `gorm:"column:order_action;default:''" json:"order_action"`
 	RelatedPositionID int64   `gorm:"column:related_position_id;default:0" json:"related_position_id"`
-	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"`         // Unix milliseconds UTC
-	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"`         // Unix milliseconds UTC
-	FilledAt          int64   `gorm:"column:filled_at" json:"filled_at"`           // Unix milliseconds UTC
+	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
+	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
+	FilledAt          int64   `gorm:"column:filled_at" json:"filled_at"`   // Unix milliseconds UTC
 }
 
 // TableName returns the table name for TraderOrder
@@ -263,6 +263,19 @@ func (s *OrderStore) GetOrderFills(orderID int64) ([]*TraderFill, error) {
 	var fills []*TraderFill
 	err := s.db.Where("order_id = ?", orderID).
 		Order("created_at ASC").
+		Find(&fills).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to query fills: %w", err)
+	}
+	return fills, nil
+}
+
+// GetTraderFills gets trader's fill records
+func (s *OrderStore) GetTraderFills(traderID string, limit int) ([]*TraderFill, error) {
+	var fills []*TraderFill
+	err := s.db.Where("trader_id = ?", traderID).
+		Order("created_at DESC").
+		Limit(limit).
 		Find(&fills).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to query fills: %w", err)

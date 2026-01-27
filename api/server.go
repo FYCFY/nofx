@@ -20,6 +20,7 @@ import (
 	"nofx/provider/hyperliquid"
 	"nofx/provider/twelvedata"
 	"nofx/store"
+	"nofx/telegram"
 	"nofx/trader"
 	"strconv"
 	"strings"
@@ -37,12 +38,13 @@ type Server struct {
 	cryptoHandler   *CryptoHandler
 	backtestManager *backtest.Manager
 	debateHandler   *DebateHandler
+	telegramManager *telegram.Manager
 	httpServer      *http.Server
 	port            int
 }
 
 // NewServer Creates API server
-func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoService *crypto.CryptoService, backtestManager *backtest.Manager, port int) *Server {
+func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoService *crypto.CryptoService, backtestManager *backtest.Manager, telegramManager *telegram.Manager, port int) *Server {
 	// Set to Release mode (reduce log output)
 	gin.SetMode(gin.ReleaseMode)
 
@@ -69,6 +71,7 @@ func NewServer(traderManager *manager.TraderManager, st *store.Store, cryptoServ
 		cryptoHandler:   cryptoHandler,
 		backtestManager: backtestManager,
 		debateHandler:   debateHandler,
+		telegramManager: telegramManager,
 		port:            port,
 	}
 
@@ -159,6 +162,13 @@ func (s *Server) setupRoutes() {
 			protected.POST("/traders/:id/close-position", s.handleClosePosition)
 			protected.PUT("/traders/:id/competition", s.handleToggleCompetition)
 			protected.GET("/traders/:id/grid-risk", s.handleGetGridRiskInfo)
+			protected.GET("/traders/:id/notify-rule", s.handleGetTraderNotifyRule)
+			protected.PUT("/traders/:id/notify-rule", s.handleUpdateTraderNotifyRule)
+
+			// Telegram notifications
+			protected.GET("/telegram/config", s.handleGetTelegramConfig)
+			protected.PUT("/telegram/config", s.handleUpdateTelegramConfig)
+			protected.POST("/telegram/test", s.handleTestTelegram)
 
 			// AI model configuration
 			protected.GET("/models", s.handleGetModelConfigs)

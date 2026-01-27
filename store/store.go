@@ -29,6 +29,8 @@ type Store struct {
 	equity   *EquityStore
 	order    *OrderStore
 	grid     *GridStore
+	telegram *TelegramStore
+	notify   *NotifyStore
 
 	mu sync.RWMutex
 }
@@ -159,6 +161,12 @@ func (s *Store) initTables() error {
 	}
 	if err := s.Grid().InitTables(); err != nil {
 		return fmt.Errorf("failed to initialize grid tables: %w", err)
+	}
+	if err := s.Telegram().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize telegram tables: %w", err)
+	}
+	if err := s.Notify().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize notify tables: %w", err)
 	}
 	return nil
 }
@@ -291,6 +299,26 @@ func (s *Store) Grid() *GridStore {
 		s.grid = NewGridStore(s.gdb)
 	}
 	return s.grid
+}
+
+// Telegram gets telegram configuration storage
+func (s *Store) Telegram() *TelegramStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.telegram == nil {
+		s.telegram = NewTelegramStore(s.gdb)
+	}
+	return s.telegram
+}
+
+// Notify gets notification rule storage
+func (s *Store) Notify() *NotifyStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.notify == nil {
+		s.notify = NewNotifyStore(s.gdb)
+	}
+	return s.notify
 }
 
 // Close closes database connection

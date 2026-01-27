@@ -31,6 +31,9 @@ import type {
   DebateVote,
   DebatePersonalityInfo,
   PositionHistoryResponse,
+  TelegramConfig,
+  TelegramConfigUpdateRequest,
+  TraderNotifyRule,
 } from '../types'
 import { CryptoService } from './crypto'
 import { httpClient } from './httpClient'
@@ -217,6 +220,51 @@ export const api = {
     // 发送加密数据
     const result = await httpClient.put(`${API_BASE}/models`, encryptedPayload)
     if (!result.success) throw new Error('更新模型配置失败')
+  },
+
+  // Telegram config
+  async getTelegramConfig(): Promise<TelegramConfig> {
+    const result = await httpClient.get<TelegramConfig>(`${API_BASE}/telegram/config`)
+    if (!result.success) throw new Error('获取Telegram配置失败')
+    return result.data || { enabled: false }
+  },
+
+  async updateTelegramConfig(request: TelegramConfigUpdateRequest): Promise<void> {
+    const config = await CryptoService.fetchCryptoConfig()
+    if (!config.transport_encryption) {
+      const result = await httpClient.put(`${API_BASE}/telegram/config`, request)
+      if (!result.success) throw new Error('更新Telegram配置失败')
+      return
+    }
+
+    const publicKey = await CryptoService.fetchPublicKey()
+    await CryptoService.initialize(publicKey)
+
+    const userId = localStorage.getItem('user_id') || ''
+    const sessionId = sessionStorage.getItem('session_id') || ''
+    const encryptedPayload = await CryptoService.encryptSensitiveData(
+      JSON.stringify(request),
+      userId,
+      sessionId
+    )
+    const result = await httpClient.put(`${API_BASE}/telegram/config`, encryptedPayload)
+    if (!result.success) throw new Error('更新Telegram配置失败')
+  },
+
+  async testTelegram(): Promise<void> {
+    const result = await httpClient.post(`${API_BASE}/telegram/test`)
+    if (!result.success) throw new Error('发送测试消息失败')
+  },
+
+  async getTraderNotifyRule(traderId: string): Promise<TraderNotifyRule> {
+    const result = await httpClient.get<TraderNotifyRule>(`${API_BASE}/traders/${traderId}/notify-rule`)
+    if (!result.success) throw new Error('获取通知规则失败')
+    return result.data || { target_equity: 0, trigger_mode: 'once' }
+  },
+
+  async updateTraderNotifyRule(traderId: string, rule: TraderNotifyRule): Promise<void> {
+    const result = await httpClient.put(`${API_BASE}/traders/${traderId}/notify-rule`, rule)
+    if (!result.success) throw new Error('更新通知规则失败')
   },
 
   // 交易所配置接口

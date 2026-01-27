@@ -10,7 +10,9 @@ import (
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/mcp"
+	"nofx/notify"
 	"nofx/store"
+	"nofx/telegram"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -128,8 +130,13 @@ func main() {
 		}
 	}
 
+	// Initialize Telegram manager and notification service
+	telegramManager := telegram.NewManager(st, traderManager)
+	telegramManager.StartAllEnabled()
+	notify.Init(st, telegramManager)
+
 	// Start API server
-	server := api.NewServer(traderManager, st, cryptoService, backtestManager, cfg.APIServerPort)
+	server := api.NewServer(traderManager, st, cryptoService, backtestManager, telegramManager, cfg.APIServerPort)
 	go func() {
 		if err := server.Start(); err != nil {
 			logger.Fatalf("❌ Failed to start API server: %v", err)
