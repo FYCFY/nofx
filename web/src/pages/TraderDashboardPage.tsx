@@ -1251,7 +1251,7 @@ export function TraderDashboardPage({
                                     {notifySaving ? '保存中...' : '保存规则'}
                                 </button>
                                 <div className="text-xs text-nofx-text-muted">
-                                    目标净值达到后推送提醒（>= 目标值）。
+                                    目标净值达到后推送提醒（&gt;= 目标值）。
                                 </div>
                             </div>
                         </div>

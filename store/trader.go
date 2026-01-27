@@ -200,19 +200,6 @@ func (s *TraderStore) GetFullConfig(userID, traderID string) (*TraderFullConfig,
 	}, nil
 }
 
-// GetByID gets trader by ID (no user filter)
-func (s *TraderStore) GetByID(traderID string) (*Trader, error) {
-	var trader Trader
-	err := s.db.Where("id = ?", traderID).First(&trader).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &trader, nil
-}
-
 // getStrategyByID internal method: gets strategy by ID
 func (s *TraderStore) getStrategyByID(userID, strategyID string) (*Strategy, error) {
 	var strategy Strategy
