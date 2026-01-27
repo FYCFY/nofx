@@ -2491,7 +2491,7 @@ func (s *Server) handleCancelPendingOrder(c *gin.Context) {
 	decision := &kernel.Decision{
 		Action:   "cancel_order",
 		Symbol:   symbol,
-		OrderID:  req.OrderID,
+		OrderID:  kernel.FlexibleString(req.OrderID),
 		ClientID: req.ClientID,
 	}
 

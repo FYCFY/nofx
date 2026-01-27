@@ -146,6 +146,40 @@ type Context struct {
 }
 
 // Decision AI trading decision
+type FlexibleString string
+
+func (s *FlexibleString) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" {
+		*s = ""
+		return nil
+	}
+	if b[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		*s = FlexibleString(str)
+		return nil
+	}
+
+	var num json.Number
+	if err := json.Unmarshal(b, &num); err == nil {
+		*s = FlexibleString(num.String())
+		return nil
+	}
+
+	var v interface{}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*s = FlexibleString(fmt.Sprintf("%v", v))
+	return nil
+}
+
+func (s FlexibleString) String() string {
+	return string(s)
+}
+
 type Decision struct {
 	Symbol string `json:"symbol"`
 	Action string `json:"action"` // Standard: "open_long", "open_short", "close_long", "close_short", "hold", "wait"
@@ -161,7 +195,7 @@ type Decision struct {
 	Price      float64 `json:"price,omitempty"`       // Limit order price (for grid)
 	Quantity   float64 `json:"quantity,omitempty"`    // Order quantity (for grid)
 	LevelIndex int     `json:"level_index,omitempty"` // Grid level index
-	OrderID    string  `json:"order_id,omitempty"`    // Order ID (for cancel)
+	OrderID    FlexibleString `json:"order_id,omitempty"` // Order ID (for cancel)
 	ClientID   string  `json:"client_id,omitempty"`   // Client order ID (for tracking/cancel)
 	PostOnly   bool    `json:"post_only,omitempty"`   // Maker-only limit order
 	ReduceOnly bool    `json:"reduce_only,omitempty"` // Reduce-only order
@@ -1736,16 +1770,28 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 		}, fmt.Errorf("failed to extract decisions: %w", err)
 	}
 
-	if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio); err != nil {
+	validDecisions, validationErrors := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio)
+	if len(validDecisions) == 0 {
+		if len(validationErrors) > 0 {
+			return &FullDecision{
+				CoTTrace:  cotTrace,
+				Decisions: decisions,
+			}, fmt.Errorf("decision validation failed: %w", validationErrors[0])
+		}
 		return &FullDecision{
 			CoTTrace:  cotTrace,
 			Decisions: decisions,
-		}, fmt.Errorf("decision validation failed: %w", err)
+		}, fmt.Errorf("decision validation failed: no valid decisions")
+	}
+	if len(validationErrors) > 0 {
+		for _, vErr := range validationErrors {
+			logger.Warnf("⚠️  Dropped invalid decision: %v", vErr)
+		}
 	}
 
 	return &FullDecision{
 		CoTTrace:  cotTrace,
-		Decisions: decisions,
+		Decisions: validDecisions,
 	}, nil
 }
 
@@ -1902,13 +1948,17 @@ func compactArrayOpen(s string) string {
 // Decision Validation
 // ============================================================================
 
-func validateDecisions(decisions []Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio float64) error {
+func validateDecisions(decisions []Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio float64) ([]Decision, []error) {
+	valid := make([]Decision, 0, len(decisions))
+	var errs []error
 	for i := range decisions {
 		if err := validateDecision(&decisions[i], accountEquity, btcEthLeverage, altcoinLeverage, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio); err != nil {
-			return fmt.Errorf("decision #%d validation failed: %w", i+1, err)
+			errs = append(errs, fmt.Errorf("decision #%d validation failed: %w", i+1, err))
+			continue
 		}
+		valid = append(valid, decisions[i])
 	}
-	return nil
+	return valid, errs
 }
 
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio float64) error {
@@ -2051,7 +2101,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if d.Symbol == "" {
 			return fmt.Errorf("cancel_order requires symbol")
 		}
-		if d.OrderID == "" && d.ClientID == "" {
+		if d.OrderID.String() == "" && d.ClientID == "" {
 			return fmt.Errorf("cancel_order requires order_id or client_id")
 		}
 	}

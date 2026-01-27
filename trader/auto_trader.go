@@ -1597,7 +1597,7 @@ func (at *AutoTrader) executeCancelOrderWithRecord(decision *kernel.Decision, ac
 		return fmt.Errorf("cancel order not supported by exchange: %s", at.exchange)
 	}
 
-	orderID := decision.OrderID
+	orderID := decision.OrderID.String()
 	if orderID == "" && decision.ClientID != "" {
 		for _, pending := range at.listPendingLimitOrders() {
 			if pending.ClientID == decision.ClientID {
