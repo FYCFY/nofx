@@ -931,23 +931,24 @@ func (at *AutoTrader) cancelGridOrder(d *kernel.Decision) error {
 		gridTrader = NewGridTraderAdapter(at.trader)
 	}
 
-	if err := gridTrader.CancelOrder(d.Symbol, d.OrderID); err != nil {
+	orderID := d.OrderID.String()
+	if err := gridTrader.CancelOrder(d.Symbol, orderID); err != nil {
 		return fmt.Errorf("failed to cancel order: %w", err)
 	}
 
 	// Update state
 	at.gridState.mu.Lock()
-	if levelIdx, ok := at.gridState.OrderBook[d.OrderID]; ok {
+	if levelIdx, ok := at.gridState.OrderBook[orderID]; ok {
 		if levelIdx >= 0 && levelIdx < len(at.gridState.Levels) {
 			at.gridState.Levels[levelIdx].State = "empty"
 			at.gridState.Levels[levelIdx].OrderID = ""
 			at.gridState.Levels[levelIdx].OrderQuantity = 0
 		}
-		delete(at.gridState.OrderBook, d.OrderID)
+		delete(at.gridState.OrderBook, orderID)
 	}
 	at.gridState.mu.Unlock()
 
-	logger.Infof("[Grid] Cancelled order: %s", d.OrderID)
+	logger.Infof("[Grid] Cancelled order: %s", orderID)
 	return nil
 }
 
