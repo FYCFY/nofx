@@ -2754,19 +2754,27 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 				if strings.ToUpper(order.Side) == "SELL" {
 					positionSide = "SHORT"
 				}
-				var setErr error
+				slNeeded := order.StopLoss > 0
+				tpNeeded := order.TakeProfit > 0
+				slOk := false
+				tpOk := false
 				if err := at.setStopLossWithRetry(order.Symbol, positionSide, qty, order.StopLoss); err != nil {
-					setErr = err
 					logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
+				} else if slNeeded {
+					slOk = true
 				}
 				if err := at.setTakeProfitWithRetry(order.Symbol, positionSide, qty, order.TakeProfit); err != nil {
-					setErr = err
 					logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
+				} else if tpNeeded {
+					tpOk = true
 				}
-				if setErr == nil {
+				if (slNeeded && slOk) || (tpNeeded && tpOk) {
 					notify.NotifyLimitFill(at.userID, at.id, order.Symbol, order.Side, order.Price, qty)
 					at.removePendingLimitOrder(order.Key)
-					logger.Infof("[%s] Pending limit order matched position, SL/TP set: %s %s", at.name, order.Symbol, order.OrderID)
+					logger.Infof("[%s] Pending limit order matched position, SL/TP set (SL=%t, TP=%t): %s %s", at.name, slOk, tpOk, order.Symbol, order.OrderID)
+				} else {
+					at.removePendingLimitOrder(order.Key)
+					logger.Warnf("[%s] Pending limit order matched position but SL/TP both failed, tracking removed: %s %s", at.name, order.Symbol, order.OrderID)
 				}
 				continue
 			}
@@ -2793,20 +2801,28 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 				positionSide = "SHORT"
 			}
 
-			var setErr error
+			slNeeded := order.StopLoss > 0
+			tpNeeded := order.TakeProfit > 0
+			slOk := false
+			tpOk := false
 			if err := at.setStopLossWithRetry(order.Symbol, positionSide, execQty, order.StopLoss); err != nil {
-				setErr = err
 				logger.Warnf("[%s] Failed to set stop loss for %s: %v", at.name, order.Symbol, err)
+			} else if slNeeded {
+				slOk = true
 			}
 			if err := at.setTakeProfitWithRetry(order.Symbol, positionSide, execQty, order.TakeProfit); err != nil {
-				setErr = err
 				logger.Warnf("[%s] Failed to set take profit for %s: %v", at.name, order.Symbol, err)
+			} else if tpNeeded {
+				tpOk = true
 			}
 
-			if setErr == nil {
+			if (slNeeded && slOk) || (tpNeeded && tpOk) {
 				notify.NotifyLimitFill(at.userID, at.id, order.Symbol, order.Side, order.Price, execQty)
 				at.removePendingLimitOrder(order.Key)
-				logger.Infof("[%s] Pending limit order filled, SL/TP set: %s %s", at.name, order.Symbol, order.OrderID)
+				logger.Infof("[%s] Pending limit order filled, SL/TP set (SL=%t, TP=%t): %s %s", at.name, slOk, tpOk, order.Symbol, order.OrderID)
+			} else {
+				at.removePendingLimitOrder(order.Key)
+				logger.Warnf("[%s] Pending limit order filled but SL/TP both failed, tracking removed: %s %s", at.name, order.Symbol, order.OrderID)
 			}
 		case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
 			at.removePendingLimitOrder(order.Key)
