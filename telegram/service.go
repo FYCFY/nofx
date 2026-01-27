@@ -116,7 +116,7 @@ func (s *Service) handleCallback(cb *tgbotapi.CallbackQuery) {
 	if cb == nil || cb.Message == nil || cb.Message.Chat == nil {
 		return
 	}
-	_ = s.bot.Request(tgbotapi.NewCallback(cb.ID, ""))
+	_, _ = s.bot.Request(tgbotapi.NewCallback(cb.ID, ""))
 
 	chatID := cb.Message.Chat.ID
 	if !s.isChatAllowed(chatID) {
