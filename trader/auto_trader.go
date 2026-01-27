@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -144,6 +145,7 @@ type AutoTrader struct {
 	gridState             *GridState         // Grid trading state (only used when StrategyType == "grid_trading")
 	pendingLimitOrders    map[string]*pendingLimitOrder
 	pendingLimitOrdersMu  sync.RWMutex
+	pendingLimitSyncing   atomic.Bool
 }
 
 // NewAutoTrader creates an automatic trader
@@ -382,6 +384,7 @@ func (at *AutoTrader) Run() error {
 
 	// Start drawdown monitoring
 	at.startDrawdownMonitor()
+	at.startPendingLimitOrderMonitor(5 * time.Second)
 
 	// Start Lighter order sync if using Lighter exchange
 	if at.exchange == "lighter" {
@@ -2647,6 +2650,12 @@ func (at *AutoTrader) listPendingLimitOrders() []*pendingLimitOrder {
 	return orders
 }
 
+func (at *AutoTrader) hasPendingLimitOrders() bool {
+	at.pendingLimitOrdersMu.RLock()
+	defer at.pendingLimitOrdersMu.RUnlock()
+	return len(at.pendingLimitOrders) > 0
+}
+
 func (at *AutoTrader) getPendingLimitOrder(orderID string) *pendingLimitOrder {
 	if orderID == "" {
 		return nil
@@ -2721,6 +2730,11 @@ func (at *AutoTrader) setTakeProfitWithRetry(symbol, positionSide string, qty, t
 }
 
 func (at *AutoTrader) syncPendingLimitOrders() {
+	if !at.pendingLimitSyncing.CompareAndSwap(false, true) {
+		return
+	}
+	defer at.pendingLimitSyncing.Store(false)
+
 	orders := at.listPendingLimitOrders()
 	if len(orders) == 0 {
 		return
@@ -2831,6 +2845,32 @@ func (at *AutoTrader) syncPendingLimitOrders() {
 			continue
 		}
 	}
+}
+
+func (at *AutoTrader) startPendingLimitOrderMonitor(interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	at.monitorWg.Add(1)
+	go func() {
+		defer at.monitorWg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		logger.Infof("🔄 [%s] Pending limit order sync enabled (every %s)", at.name, interval)
+		for {
+			select {
+			case <-ticker.C:
+				if !at.hasPendingLimitOrders() {
+					continue
+				}
+				at.syncPendingLimitOrders()
+			case <-at.stopMonitorCh:
+				logger.Infof("[%s] ⏹ Pending limit order sync stopped", at.name)
+				return
+			}
+		}
+	}()
 }
 
 func isLimitOrderType(orderType string) bool {
