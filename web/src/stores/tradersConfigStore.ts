@@ -42,7 +42,12 @@ export const useTradersConfigStore = create<TradersConfigState>((set, get) => ({
     set({ allModels: models })
     // 更新 configuredModels
     const configuredModels = models.filter((m) => {
-      return m.enabled || (m.customApiUrl && m.customApiUrl.trim() !== '')
+      return (
+        m.enabled ||
+        (m.customApiUrl && m.customApiUrl.trim() !== '') ||
+        m.oauthConnected ||
+        (m.authMode === 'codex_oauth')
+      )
     })
     set({ configuredModels })
   },

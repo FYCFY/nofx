@@ -222,6 +222,24 @@ export const api = {
     if (!result.success) throw new Error('更新模型配置失败')
   },
 
+  async openAICodexAuthorize(modelId: string): Promise<{ authorize_url: string; state: string }> {
+    const result = await httpClient.post<{ authorize_url: string; state: string }>(
+      `${API_BASE}/openai/codex/authorize`,
+      { model_id: modelId }
+    )
+    if (!result.success || !result.data) throw new Error('获取OAuth授权链接失败')
+    return result.data
+  },
+
+  async openAICodexCallback(modelId: string, callbackUrl: string, state?: string): Promise<{ status: string; expires_at?: string }> {
+    const result = await httpClient.post<{ status: string; expires_at?: string }>(
+      `${API_BASE}/openai/codex/callback`,
+      { model_id: modelId, callback_url: callbackUrl, state }
+    )
+    if (!result.success || !result.data) throw new Error('OAuth回调失败')
+    return result.data
+  },
+
   // Telegram config
   async getTelegramConfig(): Promise<TelegramConfig> {
     const result = await httpClient.get<TelegramConfig>(`${API_BASE}/telegram/config`)

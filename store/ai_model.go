@@ -18,16 +18,24 @@ type AIModelStore struct {
 
 // AIModel AI model configuration
 type AIModel struct {
-	ID              string          `gorm:"primaryKey" json:"id"`
-	UserID          string          `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
-	Name            string          `gorm:"not null" json:"name"`
-	Provider        string          `gorm:"not null" json:"provider"`
-	Enabled         bool            `gorm:"default:false" json:"enabled"`
-	APIKey          crypto.EncryptedString `gorm:"column:api_key;default:''" json:"apiKey"`
-	CustomAPIURL    string          `gorm:"column:custom_api_url;default:''" json:"customApiUrl"`
-	CustomModelName string          `gorm:"column:custom_model_name;default:''" json:"customModelName"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	ID                 string                 `gorm:"primaryKey" json:"id"`
+	UserID             string                 `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
+	Name               string                 `gorm:"not null" json:"name"`
+	Provider           string                 `gorm:"not null" json:"provider"`
+	Enabled            bool                   `gorm:"default:false" json:"enabled"`
+	APIKey             crypto.EncryptedString `gorm:"column:api_key;default:''" json:"apiKey"`
+	CustomAPIURL       string                 `gorm:"column:custom_api_url;default:''" json:"customApiUrl"`
+	CustomModelName    string                 `gorm:"column:custom_model_name;default:''" json:"customModelName"`
+	AuthMode           string                 `gorm:"column:auth_mode;default:'api_key'" json:"authMode"`
+	OAuthAccessToken   crypto.EncryptedString `gorm:"column:oauth_access_token;default:''" json:"oauthAccessToken"`
+	OAuthRefreshToken  crypto.EncryptedString `gorm:"column:oauth_refresh_token;default:''" json:"oauthRefreshToken"`
+	OAuthExpiresAt     *time.Time             `gorm:"column:oauth_expires_at" json:"oauthExpiresAt"`
+	OAuthAccountID     string                 `gorm:"column:oauth_account_id;default:''" json:"oauthAccountId"`
+	OAuthPKCEVerifier  crypto.EncryptedString `gorm:"column:oauth_pkce_verifier;default:''" json:"oauthPkceVerifier"`
+	OAuthPKCEChallenge string                 `gorm:"column:oauth_pkce_challenge;default:''" json:"oauthPkceChallenge"`
+	OAuthState         string                 `gorm:"column:oauth_state;default:''" json:"oauthState"`
+	CreatedAt          time.Time              `json:"created_at"`
+	UpdatedAt          time.Time              `json:"updated_at"`
 }
 
 func (AIModel) TableName() string { return "ai_models" }
@@ -43,10 +51,29 @@ func (s *AIModelStore) initTables() error {
 		var tableExists int64
 		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'ai_models'`).Scan(&tableExists)
 		if tableExists > 0 {
-			return nil
+			return s.migrateColumns()
 		}
 	}
 	return s.db.AutoMigrate(&AIModel{})
+}
+
+func (s *AIModelStore) migrateColumns() error {
+	stmts := []string{
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS auth_mode TEXT DEFAULT 'api_key'`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_access_token TEXT DEFAULT ''`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_refresh_token TEXT DEFAULT ''`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_expires_at TIMESTAMP WITH TIME ZONE`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_account_id TEXT DEFAULT ''`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_pkce_verifier TEXT DEFAULT ''`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_pkce_challenge TEXT DEFAULT ''`,
+		`ALTER TABLE ai_models ADD COLUMN IF NOT EXISTS oauth_state TEXT DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if err := s.db.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *AIModelStore) initDefaultData() error {
@@ -108,6 +135,35 @@ func (s *AIModelStore) GetByID(modelID string) (*AIModel, error) {
 	return &model, nil
 }
 
+// GetByProvider retrieves an AI model by provider for a user (fallbacks to default).
+func (s *AIModelStore) GetByProvider(userID, provider string) (*AIModel, error) {
+	if provider == "" {
+		return nil, fmt.Errorf("provider cannot be empty")
+	}
+	candidates := []string{}
+	if userID != "" {
+		candidates = append(candidates, userID)
+	}
+	if userID != "default" {
+		candidates = append(candidates, "default")
+	}
+	if len(candidates) == 0 {
+		candidates = append(candidates, "default")
+	}
+
+	for _, uid := range candidates {
+		var model AIModel
+		err := s.db.Where("user_id = ? AND provider = ?", uid, provider).First(&model).Error
+		if err == nil {
+			return &model, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
 // GetDefault retrieves the default enabled AI model
 func (s *AIModelStore) GetDefault(userID string) (*AIModel, error) {
 	if userID == "" {
@@ -139,7 +195,7 @@ func (s *AIModelStore) firstEnabled(userID string) (*AIModel, error) {
 
 // Update updates AI model, creates if not exists
 // IMPORTANT: If apiKey is empty string, the existing API key will be preserved (not overwritten)
-func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPIURL, customModelName string) error {
+func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPIURL, customModelName, authMode string) error {
 	// Try exact ID match first
 	var existingModel AIModel
 	err := s.db.Where("user_id = ? AND id = ?", userID, id).First(&existingModel).Error
@@ -151,9 +207,21 @@ func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPI
 			"custom_model_name": customModelName,
 			"updated_at":        time.Now().UTC(),
 		}
+		if authMode != "" {
+			updates["auth_mode"] = authMode
+		}
 		// If apiKey is not empty, update it (encryption handled by crypto.EncryptedString)
 		if apiKey != "" {
 			updates["api_key"] = crypto.EncryptedString(apiKey)
+		}
+		if authMode == "api_key" {
+			updates["oauth_access_token"] = crypto.EncryptedString("")
+			updates["oauth_refresh_token"] = crypto.EncryptedString("")
+			updates["oauth_expires_at"] = nil
+			updates["oauth_account_id"] = ""
+			updates["oauth_pkce_verifier"] = crypto.EncryptedString("")
+			updates["oauth_pkce_challenge"] = ""
+			updates["oauth_state"] = ""
 		}
 		return s.db.Model(&existingModel).Updates(updates).Error
 	}
@@ -169,8 +237,20 @@ func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPI
 			"custom_model_name": customModelName,
 			"updated_at":        time.Now().UTC(),
 		}
+		if authMode != "" {
+			updates["auth_mode"] = authMode
+		}
 		if apiKey != "" {
 			updates["api_key"] = crypto.EncryptedString(apiKey)
+		}
+		if authMode == "api_key" {
+			updates["oauth_access_token"] = crypto.EncryptedString("")
+			updates["oauth_refresh_token"] = crypto.EncryptedString("")
+			updates["oauth_expires_at"] = nil
+			updates["oauth_account_id"] = ""
+			updates["oauth_pkce_verifier"] = crypto.EncryptedString("")
+			updates["oauth_pkce_challenge"] = ""
+			updates["oauth_state"] = ""
 		}
 		return s.db.Model(&existingModel).Updates(updates).Error
 	}
@@ -217,8 +297,55 @@ func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPI
 		APIKey:          crypto.EncryptedString(apiKey),
 		CustomAPIURL:    customAPIURL,
 		CustomModelName: customModelName,
+		AuthMode:        authMode,
 	}
 	return s.db.Create(newModel).Error
+}
+
+func (s *AIModelStore) SaveOAuthPKCE(userID, modelID, verifier, challenge, state string) error {
+	updates := map[string]interface{}{
+		"oauth_pkce_verifier":  crypto.EncryptedString(verifier),
+		"oauth_pkce_challenge": challenge,
+		"oauth_state":          state,
+		"updated_at":           time.Now().UTC(),
+	}
+	return s.db.Model(&AIModel{}).Where("user_id = ? AND id = ?", userID, modelID).Updates(updates).Error
+}
+
+func (s *AIModelStore) SaveOAuthTokens(userID, modelID, accessToken, refreshToken, accountID string, expiresAt time.Time) error {
+	updates := map[string]interface{}{
+		"auth_mode":            "codex_oauth",
+		"oauth_access_token":   crypto.EncryptedString(accessToken),
+		"oauth_refresh_token":  crypto.EncryptedString(refreshToken),
+		"oauth_account_id":     accountID,
+		"oauth_expires_at":     expiresAt,
+		"oauth_pkce_verifier":  crypto.EncryptedString(""),
+		"oauth_pkce_challenge": "",
+		"oauth_state":          "",
+		"updated_at":           time.Now().UTC(),
+	}
+	return s.db.Model(&AIModel{}).Where("user_id = ? AND id = ?", userID, modelID).Updates(updates).Error
+}
+
+func (s *AIModelStore) UpdateOAuthTokens(userID, modelID, accessToken, refreshToken string, expiresAt time.Time) error {
+	updates := map[string]interface{}{
+		"oauth_access_token":  crypto.EncryptedString(accessToken),
+		"oauth_refresh_token": crypto.EncryptedString(refreshToken),
+		"oauth_expires_at":    expiresAt,
+		"updated_at":          time.Now().UTC(),
+	}
+	return s.db.Model(&AIModel{}).Where("user_id = ? AND id = ?", userID, modelID).Updates(updates).Error
+}
+
+func (s *AIModelStore) UpdateOAuthAccountID(userID, modelID, accountID string) error {
+	if accountID == "" {
+		return nil
+	}
+	updates := map[string]interface{}{
+		"oauth_account_id": accountID,
+		"updated_at":       time.Now().UTC(),
+	}
+	return s.db.Model(&AIModel{}).Where("user_id = ? AND id = ?", userID, modelID).Updates(updates).Error
 }
 
 // Create creates an AI model

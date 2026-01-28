@@ -11,12 +11,17 @@ import (
 
 // AIConfig defines the AI client configuration used in backtesting.
 type AIConfig struct {
-	Provider    string  `json:"provider"`
-	Model       string  `json:"model"`
-	APIKey      string  `json:"key"`
-	SecretKey   string  `json:"secret_key,omitempty"`
-	BaseURL     string  `json:"base_url,omitempty"`
-	Temperature float64 `json:"temperature,omitempty"`
+	Provider          string    `json:"provider"`
+	Model             string    `json:"model"`
+	APIKey            string    `json:"key"`
+	SecretKey         string    `json:"secret_key,omitempty"`
+	BaseURL           string    `json:"base_url,omitempty"`
+	Temperature       float64   `json:"temperature,omitempty"`
+	AuthMode          string    `json:"auth_mode,omitempty"`
+	OAuthAccessToken  string    `json:"oauth_access_token,omitempty"`
+	OAuthRefreshToken string    `json:"oauth_refresh_token,omitempty"`
+	OAuthExpiresAt    time.Time `json:"oauth_expires_at,omitempty"`
+	OAuthAccountID    string    `json:"oauth_account_id,omitempty"`
 }
 
 type LeverageConfig struct {
@@ -241,12 +246,12 @@ func (cfg *BacktestConfig) ToStrategyConfig() *store.StrategyConfig {
 
 	return &store.StrategyConfig{
 		CoinSource: store.CoinSourceConfig{
-			SourceType: "static",
+			SourceType:  "static",
 			StaticCoins: cfg.Symbols,
-			UseAI500:   false,
-			AI500Limit: len(cfg.Symbols),
-			UseOITop:   false,
-			OITopLimit: 0,
+			UseAI500:    false,
+			AI500Limit:  len(cfg.Symbols),
+			UseOITop:    false,
+			OITopLimit:  0,
 		},
 		Indicators: store.IndicatorConfig{
 			Klines: store.KlineConfig{

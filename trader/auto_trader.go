@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"nofx/ai"
 	"nofx/experience"
 	"nofx/kernel"
 	"nofx/logger"
@@ -21,9 +22,11 @@ import (
 // AutoTraderConfig auto trading configuration (simplified version - AI makes all decisions)
 type AutoTraderConfig struct {
 	// Trader identification
-	ID      string // Trader unique identifier (for log directory, etc.)
-	Name    string // Trader display name
-	AIModel string // AI model: "qwen" or "deepseek"
+	ID         string // Trader unique identifier (for log directory, etc.)
+	Name       string // Trader display name
+	AIModel    string // AI model: "qwen" or "deepseek"
+	AIModelID  string // AI model config ID
+	AIAuthMode string // AI auth mode (e.g., api_key, codex_oauth)
 
 	// Trading platform selection
 	Exchange   string // Exchange type: "binance", "bybit", "okx", "bitget", "hyperliquid", "aster" or "lighter"
@@ -195,9 +198,18 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		logger.Infof("🤖 [%s] Using xAI Grok AI", config.Name)
 
 	case "openai":
-		mcpClient = mcp.NewOpenAIClient()
-		mcpClient.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
-		logger.Infof("🤖 [%s] Using OpenAI", config.Name)
+		if config.AIAuthMode == "codex_oauth" {
+			mcpClient = mcp.NewOpenAICodexClient()
+			if concrete, ok := mcpClient.(*mcp.OpenAICodexClient); ok {
+				concrete.SetTokenProvider(ai.OpenAICodexTokenProvider(st, userID, config.AIModelID))
+				concrete.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
+			}
+			logger.Infof("🤖 [%s] Using OpenAI Codex (OAuth)", config.Name)
+		} else {
+			mcpClient = mcp.NewOpenAIClient()
+			mcpClient.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
+			logger.Infof("🤖 [%s] Using OpenAI", config.Name)
+		}
 
 	case "qwen":
 		mcpClient = mcp.NewQwenClient()

@@ -44,6 +44,10 @@ func loadCheckpointDB(runID string) (*Checkpoint, error) {
 func saveConfigDB(runID string, cfg *BacktestConfig) error {
 	persist := *cfg
 	persist.AICfg.APIKey = ""
+	persist.AICfg.OAuthAccessToken = ""
+	persist.AICfg.OAuthRefreshToken = ""
+	persist.AICfg.OAuthExpiresAt = time.Time{}
+	persist.AICfg.OAuthAccountID = ""
 	data, err := json.Marshal(&persist)
 	if err != nil {
 		return err

@@ -563,6 +563,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         apiKey: '',
         customApiUrl: '',
         customModelName: '',
+        authMode: 'api_key',
         enabled: false,
       }),
       buildRequest: (models) => ({
@@ -571,6 +572,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
             model.provider,
             {
               enabled: model.enabled,
+              auth_mode: model.authMode || 'api_key',
               api_key: model.apiKey || '',
               custom_api_url: model.customApiUrl || '',
               custom_model_name: model.customModelName || '',
@@ -596,7 +598,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     modelId: string,
     apiKey: string,
     customApiUrl?: string,
-    customModelName?: string
+    customModelName?: string,
+    authMode?: string
   ) => {
     try {
       // 创建或更新用户的模型配置
@@ -621,6 +624,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                 apiKey,
                 customApiUrl: customApiUrl || '',
                 customModelName: customModelName || '',
+                authMode: authMode || m.authMode || 'api_key',
                 enabled: true,
               }
               : m
@@ -632,6 +636,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           apiKey,
           customApiUrl: customApiUrl || '',
           customModelName: customModelName || '',
+          authMode: authMode || modelToUpdate.authMode || 'api_key',
           enabled: true,
         }
         updatedModels = [...(allModels || []), newModel]
@@ -643,6 +648,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
             model.provider, // 使用 provider 而不是 id
             {
               enabled: model.enabled,
+              auth_mode: model.authMode || 'api_key',
               api_key: model.apiKey || '',
               custom_api_url: model.customApiUrl || '',
               custom_model_name: model.customModelName || '',
@@ -1401,7 +1407,8 @@ function ModelConfigModal({
     modelId: string,
     apiKey: string,
     baseUrl?: string,
-    modelName?: string
+    modelName?: string,
+    authMode?: string
   ) => void
   onDelete: (modelId: string) => void
   onClose: () => void
@@ -1411,6 +1418,12 @@ function ModelConfigModal({
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [modelName, setModelName] = useState('')
+  const [authMode, setAuthMode] = useState('api_key')
+  const [oauthCallbackUrl, setOauthCallbackUrl] = useState('')
+  const [oauthLoading, setOauthLoading] = useState(false)
+  const [oauthState, setOauthState] = useState('')
+  const [oauthConnected, setOauthConnected] = useState(false)
+  const [oauthExpiresAt, setOauthExpiresAt] = useState<string | null>(null)
 
   // 获取当前编辑的模型信息 - 编辑时从已配置的模型中查找，新建时从所有支持的模型中查找
   const selectedModel = editingModelId
@@ -1419,22 +1432,35 @@ function ModelConfigModal({
 
   // 如果是编辑现有模型，初始化API Key、Base URL和Model Name
   useEffect(() => {
-    if (editingModelId && selectedModel) {
+    if (!selectedModel) return
+    if (editingModelId) {
       setApiKey(selectedModel.apiKey || '')
       setBaseUrl(selectedModel.customApiUrl || '')
       setModelName(selectedModel.customModelName || '')
     }
+    setAuthMode(selectedModel.authMode || 'api_key')
+    setOauthConnected(!!selectedModel.oauthConnected)
+    setOauthExpiresAt(selectedModel.oauthExpiresAt || null)
   }, [editingModelId, selectedModel])
+
+  useEffect(() => {
+    setOauthCallbackUrl('')
+    setOauthState('')
+    setOauthLoading(false)
+  }, [selectedModelId])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!selectedModelId || !apiKey.trim()) return
+    const requiresApiKey =
+      selectedModel?.provider !== 'openai' || authMode !== 'codex_oauth'
+    if (!selectedModelId || (requiresApiKey && !apiKey.trim())) return
 
     onSave(
       selectedModelId,
       apiKey.trim(),
       baseUrl.trim() || undefined,
-      modelName.trim() || undefined
+      modelName.trim() || undefined,
+      authMode
     )
   }
 
@@ -1568,6 +1594,128 @@ function ModelConfigModal({
 
             {selectedModel && (
               <>
+                {selectedModel.provider === 'openai' && (
+                  <div>
+                    <label
+                      className="block text-sm font-semibold mb-2"
+                      style={{ color: '#EAECEF' }}
+                    >
+                      {language === 'zh' ? '认证方式' : 'Auth Mode'}
+                    </label>
+                    <select
+                      value={authMode}
+                      onChange={(e) => setAuthMode(e.target.value)}
+                      className="w-full px-3 py-2 rounded"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                    >
+                      <option value="api_key">
+                        {language === 'zh' ? 'API Key' : 'API Key'}
+                      </option>
+                      <option value="codex_oauth">
+                        {language === 'zh'
+                          ? 'Codex 订阅（OAuth）'
+                          : 'Codex Subscription (OAuth)'}
+                      </option>
+                    </select>
+                  </div>
+                )}
+
+                {selectedModel.provider === 'openai' && authMode === 'codex_oauth' && (
+                  <div
+                    className="p-4 rounded"
+                    style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+                  >
+                    <div className="text-sm font-semibold mb-2" style={{ color: '#EAECEF' }}>
+                      {language === 'zh' ? 'OAuth 登录' : 'OAuth Login'}
+                    </div>
+                    <div className="text-xs mb-3" style={{ color: '#848E9C' }}>
+                      {language === 'zh'
+                        ? '点击“开始授权”后会打开登录页面，登录完成后请复制浏览器地址栏中的回调 URL 并粘贴到下方。'
+                        : 'Click “Start Auth” to open the login page. After login, copy the redirect URL from your browser and paste it below.'}
+                    </div>
+                    <div className="flex gap-2 mb-3">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!selectedModelId) return
+                          try {
+                            setOauthLoading(true)
+                            const data = await api.openAICodexAuthorize(selectedModelId)
+                            setOauthState(data.state)
+                            window.open(data.authorize_url, '_blank', 'noopener,noreferrer')
+                            toast.success(language === 'zh' ? '已打开授权页面' : 'Authorization page opened')
+                          } catch (err) {
+                            console.error('Failed to start OAuth:', err)
+                            toast.error(language === 'zh' ? '打开授权页面失败' : 'Failed to open authorization page')
+                          } finally {
+                            setOauthLoading(false)
+                          }
+                        }}
+                        className="px-3 py-2 rounded text-sm font-semibold"
+                        style={{ background: '#2B3139', color: '#EAECEF' }}
+                        disabled={oauthLoading}
+                      >
+                        {oauthLoading
+                          ? language === 'zh'
+                            ? '处理中…'
+                            : 'Loading...'
+                          : language === 'zh'
+                            ? '开始授权'
+                            : 'Start Auth'}
+                      </button>
+                      {oauthConnected && (
+                        <div className="text-xs flex items-center" style={{ color: '#23CE6B' }}>
+                          {language === 'zh' ? '已连接' : 'Connected'}
+                        </div>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      value={oauthCallbackUrl}
+                      onChange={(e) => setOauthCallbackUrl(e.target.value)}
+                      placeholder={language === 'zh' ? '粘贴回调 URL 或 code' : 'Paste redirect URL or code'}
+                      className="w-full px-3 py-2 rounded"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!selectedModelId || !oauthCallbackUrl.trim()) return
+                        try {
+                          setOauthLoading(true)
+                          const data = await api.openAICodexCallback(selectedModelId, oauthCallbackUrl.trim(), oauthState || undefined)
+                          setOauthConnected(true)
+                          setOauthExpiresAt(data.expires_at || null)
+                          toast.success(language === 'zh' ? '授权成功' : 'Authorization successful')
+                        } catch (err) {
+                          console.error('OAuth callback failed:', err)
+                          toast.error(language === 'zh' ? '授权失败' : 'Authorization failed')
+                        } finally {
+                          setOauthLoading(false)
+                        }
+                      }}
+                      className="mt-3 px-3 py-2 rounded text-sm font-semibold"
+                      style={{ background: '#F0B90B', color: '#000' }}
+                      disabled={!oauthCallbackUrl.trim() || oauthLoading}
+                    >
+                      {language === 'zh' ? '完成授权' : 'Complete Auth'}
+                    </button>
+                    {oauthExpiresAt && (
+                      <div className="text-xs mt-2" style={{ color: '#848E9C' }}>
+                        {language === 'zh' ? '过期时间' : 'Expires'}: {oauthExpiresAt}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div>
                   <label
                     className="block text-sm font-semibold mb-2"
@@ -1586,7 +1734,8 @@ function ModelConfigModal({
                       border: '1px solid #2B3139',
                       color: '#EAECEF',
                     }}
-                    required
+                    required={selectedModel.provider !== 'openai' || authMode !== 'codex_oauth'}
+                    disabled={selectedModel.provider === 'openai' && authMode === 'codex_oauth'}
                   />
                 </div>
 
@@ -1678,7 +1827,11 @@ function ModelConfigModal({
             </button>
             <button
               type="submit"
-              disabled={!selectedModel || !apiKey.trim()}
+              disabled={
+                !selectedModel ||
+                ((selectedModel.provider !== 'openai' || authMode !== 'codex_oauth') &&
+                  !apiKey.trim())
+              }
               className="flex-1 px-4 py-2 rounded text-sm font-semibold disabled:opacity-50"
               style={{ background: '#F0B90B', color: '#000' }}
             >

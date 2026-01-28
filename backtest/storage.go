@@ -253,6 +253,10 @@ func SaveConfig(runID string, cfg *BacktestConfig) error {
 	}
 	persist := *cfg
 	persist.AICfg.APIKey = ""
+	persist.AICfg.OAuthAccessToken = ""
+	persist.AICfg.OAuthRefreshToken = ""
+	persist.AICfg.OAuthExpiresAt = time.Time{}
+	persist.AICfg.OAuthAccountID = ""
 	if usingDB() {
 		return saveConfigDB(runID, &persist)
 	}

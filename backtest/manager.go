@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"nofx/mcp"
 	"nofx/store"
@@ -63,6 +64,10 @@ func (m *Manager) Start(ctx context.Context, cfg BacktestConfig) (*Runner, error
 
 	persistCfg := cfg
 	persistCfg.AICfg.APIKey = ""
+	persistCfg.AICfg.OAuthAccessToken = ""
+	persistCfg.AICfg.OAuthRefreshToken = ""
+	persistCfg.AICfg.OAuthExpiresAt = time.Time{}
+	persistCfg.AICfg.OAuthAccountID = ""
 	if err := SaveConfig(cfg.RunID, &persistCfg); err != nil {
 		return nil, err
 	}

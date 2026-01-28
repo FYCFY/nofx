@@ -65,6 +65,24 @@ func configureMCPClient(cfg BacktestConfig, base mcp.AIClient) (mcp.AIClient, er
 		grokC.(*mcp.GrokClient).SetAPIKey(cfg.AICfg.APIKey, cfg.AICfg.BaseURL, cfg.AICfg.Model)
 		return grokC, nil
 	case "openai":
+		if cfg.AICfg.AuthMode == "codex_oauth" {
+			if cfg.AICfg.OAuthAccessToken == "" {
+				return nil, fmt.Errorf("openai codex oauth requires access token")
+			}
+			codexC := mcp.NewOpenAICodexClientWithOptions()
+			codex := codexC.(*mcp.OpenAICodexClient)
+			codex.SetOAuthTokens(
+				cfg.AICfg.OAuthAccessToken,
+				cfg.AICfg.OAuthRefreshToken,
+				cfg.AICfg.OAuthExpiresAt,
+				cfg.AICfg.OAuthAccountID,
+				nil,
+			)
+			if cfg.AICfg.BaseURL != "" || cfg.AICfg.Model != "" {
+				codex.SetAPIKey(cfg.AICfg.OAuthAccessToken, cfg.AICfg.BaseURL, cfg.AICfg.Model)
+			}
+			return codex, nil
+		}
 		if cfg.AICfg.APIKey == "" {
 			return nil, fmt.Errorf("openai provider requires api key")
 		}

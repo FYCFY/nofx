@@ -173,6 +173,9 @@ func (s *Server) setupRoutes() {
 			// AI model configuration
 			protected.GET("/models", s.handleGetModelConfigs)
 			protected.PUT("/models", s.handleUpdateModelConfigs)
+			protected.POST("/openai/codex/authorize", s.handleOpenAICodexAuthorize)
+			protected.POST("/openai/codex/callback", s.handleOpenAICodexCallback)
+			protected.POST("/openai/codex/refresh", s.handleOpenAICodexRefresh)
 
 			// Exchange configuration
 			protected.GET("/exchanges", s.handleGetExchangeConfigs)
@@ -431,18 +434,22 @@ type ModelConfig struct {
 	Name         string `json:"name"`
 	Provider     string `json:"provider"`
 	Enabled      bool   `json:"enabled"`
+	AuthMode     string `json:"authMode,omitempty"`
 	APIKey       string `json:"apiKey,omitempty"`
 	CustomAPIURL string `json:"customApiUrl,omitempty"`
 }
 
 // SafeModelConfig Safe model configuration structure (does not contain sensitive information)
 type SafeModelConfig struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Provider        string `json:"provider"`
-	Enabled         bool   `json:"enabled"`
-	CustomAPIURL    string `json:"customApiUrl"`    // Custom API URL (usually not sensitive)
-	CustomModelName string `json:"customModelName"` // Custom model name (not sensitive)
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Provider        string     `json:"provider"`
+	Enabled         bool       `json:"enabled"`
+	AuthMode        string     `json:"authMode"`
+	OAuthConnected  bool       `json:"oauthConnected"`
+	OAuthExpiresAt  *time.Time `json:"oauthExpiresAt,omitempty"`
+	CustomAPIURL    string     `json:"customApiUrl"`    // Custom API URL (usually not sensitive)
+	CustomModelName string     `json:"customModelName"` // Custom model name (not sensitive)
 }
 
 type ExchangeConfig struct {
@@ -473,6 +480,7 @@ type SafeExchangeConfig struct {
 type UpdateModelConfigRequest struct {
 	Models map[string]struct {
 		Enabled         bool   `json:"enabled"`
+		AuthMode        string `json:"auth_mode"`
 		APIKey          string `json:"api_key"`
 		CustomAPIURL    string `json:"custom_api_url"`
 		CustomModelName string `json:"custom_model_name"`
@@ -1644,13 +1652,13 @@ func (s *Server) handleGetModelConfigs(c *gin.Context) {
 	if len(models) == 0 {
 		logger.Infof("⚠️ No AI models in database, returning defaults")
 		defaultModels := []SafeModelConfig{
-			{ID: "deepseek", Name: "DeepSeek AI", Provider: "deepseek", Enabled: false},
-			{ID: "qwen", Name: "Qwen AI", Provider: "qwen", Enabled: false},
-			{ID: "openai", Name: "OpenAI", Provider: "openai", Enabled: false},
-			{ID: "claude", Name: "Claude AI", Provider: "claude", Enabled: false},
-			{ID: "gemini", Name: "Gemini AI", Provider: "gemini", Enabled: false},
-			{ID: "grok", Name: "Grok AI", Provider: "grok", Enabled: false},
-			{ID: "kimi", Name: "Kimi AI", Provider: "kimi", Enabled: false},
+			{ID: "deepseek", Name: "DeepSeek AI", Provider: "deepseek", Enabled: false, AuthMode: "api_key"},
+			{ID: "qwen", Name: "Qwen AI", Provider: "qwen", Enabled: false, AuthMode: "api_key"},
+			{ID: "openai", Name: "OpenAI", Provider: "openai", Enabled: false, AuthMode: "api_key"},
+			{ID: "claude", Name: "Claude AI", Provider: "claude", Enabled: false, AuthMode: "api_key"},
+			{ID: "gemini", Name: "Gemini AI", Provider: "gemini", Enabled: false, AuthMode: "api_key"},
+			{ID: "grok", Name: "Grok AI", Provider: "grok", Enabled: false, AuthMode: "api_key"},
+			{ID: "kimi", Name: "Kimi AI", Provider: "kimi", Enabled: false, AuthMode: "api_key"},
 		}
 		c.JSON(http.StatusOK, defaultModels)
 		return
@@ -1661,11 +1669,24 @@ func (s *Server) handleGetModelConfigs(c *gin.Context) {
 	// Convert to safe response structure, remove sensitive information
 	safeModels := make([]SafeModelConfig, len(models))
 	for i, model := range models {
+		authMode := strings.TrimSpace(model.AuthMode)
+		if authMode == "" {
+			authMode = "api_key"
+		}
+		oauthConnected := false
+		if authMode == "codex_oauth" && strings.TrimSpace(string(model.OAuthAccessToken)) != "" {
+			if model.OAuthExpiresAt == nil || model.OAuthExpiresAt.After(time.Now().Add(-2*time.Minute)) {
+				oauthConnected = true
+			}
+		}
 		safeModels[i] = SafeModelConfig{
 			ID:              model.ID,
 			Name:            model.Name,
 			Provider:        model.Provider,
 			Enabled:         model.Enabled,
+			AuthMode:        authMode,
+			OAuthConnected:  oauthConnected,
+			OAuthExpiresAt:  model.OAuthExpiresAt,
 			CustomAPIURL:    model.CustomAPIURL,
 			CustomModelName: model.CustomModelName,
 		}
@@ -1743,7 +1764,7 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 			tradersToReload[t.ID] = true
 		}
 
-		err := s.store.AIModel().Update(userID, modelID, modelData.Enabled, modelData.APIKey, modelData.CustomAPIURL, modelData.CustomModelName)
+		err := s.store.AIModel().Update(userID, modelID, modelData.Enabled, modelData.APIKey, modelData.CustomAPIURL, modelData.CustomModelName, modelData.AuthMode)
 		if err != nil {
 			SafeInternalError(c, fmt.Sprintf("Update model %s", modelID), err)
 			return

@@ -815,9 +815,16 @@ func (s *Server) hydrateBacktestAIConfig(cfg *backtest.BacktestConfig) error {
 		return fmt.Errorf("AI model %s is not enabled yet", model.Name)
 	}
 
+	authMode := strings.TrimSpace(model.AuthMode)
+	if authMode == "" {
+		authMode = "api_key"
+	}
 	apiKey := strings.TrimSpace(string(model.APIKey))
-	if apiKey == "" {
+	if authMode != "codex_oauth" && apiKey == "" {
 		return fmt.Errorf("AI model %s is missing API Key, please configure it in the system first", model.Name)
+	}
+	if authMode == "codex_oauth" && strings.TrimSpace(string(model.OAuthAccessToken)) == "" {
+		return fmt.Errorf("AI model %s is missing Codex OAuth token, please authenticate first", model.Name)
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(model.Provider))
@@ -841,6 +848,13 @@ func (s *Server) hydrateBacktestAIConfig(cfg *backtest.BacktestConfig) error {
 	}
 	cfg.AICfg.Provider = provider
 	cfg.AICfg.APIKey = apiKey
+	cfg.AICfg.AuthMode = authMode
+	cfg.AICfg.OAuthAccessToken = strings.TrimSpace(string(model.OAuthAccessToken))
+	cfg.AICfg.OAuthRefreshToken = strings.TrimSpace(string(model.OAuthRefreshToken))
+	if model.OAuthExpiresAt != nil {
+		cfg.AICfg.OAuthExpiresAt = *model.OAuthExpiresAt
+	}
+	cfg.AICfg.OAuthAccountID = strings.TrimSpace(model.OAuthAccountID)
 	cfg.AICfg.BaseURL = strings.TrimSpace(model.CustomAPIURL)
 	modelName := strings.TrimSpace(model.CustomModelName)
 	if cfg.AICfg.Model == "" {

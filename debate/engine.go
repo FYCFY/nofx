@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"nofx/ai"
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
@@ -88,7 +89,15 @@ func (e *DebateEngine) InitializeClients(participants []*store.DebateParticipant
 		case "qwen":
 			client = mcp.NewQwenClient()
 		case "openai":
-			client = mcp.NewOpenAIClient()
+			if strings.TrimSpace(aiModel.AuthMode) == "codex_oauth" {
+				client = mcp.NewOpenAICodexClient()
+				if concrete, ok := client.(*mcp.OpenAICodexClient); ok {
+					concrete.SetTokenProvider(ai.OpenAICodexTokenProviderWithStore(e.aiModelStore, aiModel.UserID, aiModel.ID))
+					concrete.SetAPIKey(string(aiModel.OAuthAccessToken), aiModel.CustomAPIURL, aiModel.CustomModelName)
+				}
+			} else {
+				client = mcp.NewOpenAIClient()
+			}
 		case "claude":
 			client = mcp.NewClaudeClient()
 		case "gemini":
@@ -102,7 +111,13 @@ func (e *DebateEngine) InitializeClients(participants []*store.DebateParticipant
 		}
 
 		// Configure client (convert EncryptedString to string)
-		client.SetAPIKey(string(aiModel.APIKey), aiModel.CustomAPIURL, aiModel.CustomModelName)
+		if aiModel.Provider == "openai" && strings.TrimSpace(aiModel.AuthMode) == "codex_oauth" {
+			if concrete, ok := client.(*mcp.OpenAICodexClient); ok {
+				concrete.SetAPIKey(string(aiModel.OAuthAccessToken), aiModel.CustomAPIURL, aiModel.CustomModelName)
+			}
+		} else {
+			client.SetAPIKey(string(aiModel.APIKey), aiModel.CustomAPIURL, aiModel.CustomModelName)
+		}
 
 		e.clients[p.AIModelID] = client
 	}
@@ -620,10 +635,10 @@ func (e *DebateEngine) getParticipantVote(
 	// If no valid decisions, create a default one with session symbol
 	if primaryDecision == nil && session.Symbol != "" {
 		primaryDecision = &store.DebateDecision{
-			Action:     "hold",
-			Symbol:     session.Symbol,
-			Confidence: 50,
-			Leverage:   5,
+			Action:      "hold",
+			Symbol:      session.Symbol,
+			Confidence:  50,
+			Leverage:    5,
 			PositionPct: 0.2,
 		}
 		decisions = []*store.DebateDecision{primaryDecision}
@@ -1105,16 +1120,16 @@ func parseDecisions(response string) ([]*store.DebateDecision, int) {
 	if jsonContent != "" {
 		// Intermediate struct to handle both field naming conventions
 		type rawDecision struct {
-			Action       string  `json:"action"`
-			Symbol       string  `json:"symbol"`
-			Confidence   int     `json:"confidence"`
-			Leverage     int     `json:"leverage"`
-			PositionPct  float64 `json:"position_pct"`
-			StopLoss     float64 `json:"stop_loss"`
-			TakeProfit   float64 `json:"take_profit"`
-			StopLossPct  float64 `json:"stop_loss_pct"`  // Alternative field name
+			Action        string  `json:"action"`
+			Symbol        string  `json:"symbol"`
+			Confidence    int     `json:"confidence"`
+			Leverage      int     `json:"leverage"`
+			PositionPct   float64 `json:"position_pct"`
+			StopLoss      float64 `json:"stop_loss"`
+			TakeProfit    float64 `json:"take_profit"`
+			StopLossPct   float64 `json:"stop_loss_pct"`   // Alternative field name
 			TakeProfitPct float64 `json:"take_profit_pct"` // Alternative field name
-			Reasoning    string  `json:"reasoning"`
+			Reasoning     string  `json:"reasoning"`
 		}
 
 		convertRawDecision := func(r *rawDecision) *store.DebateDecision {

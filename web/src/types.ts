@@ -127,6 +127,9 @@ export interface AIModel {
   name: string
   provider: string
   enabled: boolean
+  authMode?: string
+  oauthConnected?: boolean
+  oauthExpiresAt?: string
   apiKey?: string
   customApiUrl?: string
   customModelName?: string
@@ -219,6 +222,7 @@ export interface UpdateModelConfigRequest {
   models: {
     [key: string]: {
       enabled: boolean
+      auth_mode?: string
       api_key: string
       custom_api_url?: string
       custom_model_name?: string

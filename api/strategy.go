@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"nofx/ai"
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/store"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -377,9 +379,9 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	}
 
 	var req struct {
-		Config          store.StrategyConfig `json:"config" binding:"required"`
-		AccountEquity   float64              `json:"account_equity"`
-		PromptVariant   string               `json:"prompt_variant"`
+		Config        store.StrategyConfig `json:"config" binding:"required"`
+		AccountEquity float64              `json:"account_equity"`
+		PromptVariant string               `json:"prompt_variant"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -593,8 +595,15 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 		return "", fmt.Errorf("AI model %s is not enabled", model.Name)
 	}
 
-	if model.APIKey == "" {
+	authMode := strings.TrimSpace(model.AuthMode)
+	if authMode == "" {
+		authMode = "api_key"
+	}
+	if authMode != "codex_oauth" && model.APIKey == "" {
 		return "", fmt.Errorf("AI model %s is missing API Key", model.Name)
+	}
+	if authMode == "codex_oauth" && strings.TrimSpace(string(model.OAuthAccessToken)) == "" {
+		return "", fmt.Errorf("AI model %s is missing Codex OAuth token", model.Name)
 	}
 
 	// Create AI client
@@ -623,8 +632,17 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 		aiClient = mcp.NewGrokClient()
 		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
 	case "openai":
-		aiClient = mcp.NewOpenAIClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		if authMode == "codex_oauth" {
+			codexClient := mcp.NewOpenAICodexClient()
+			if concrete, ok := codexClient.(*mcp.OpenAICodexClient); ok {
+				concrete.SetTokenProvider(ai.OpenAICodexTokenProvider(s.store, userID, model.ID))
+				concrete.SetAPIKey(string(model.OAuthAccessToken), model.CustomAPIURL, model.CustomModelName)
+			}
+			aiClient = codexClient
+		} else {
+			aiClient = mcp.NewOpenAIClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		}
 	default:
 		// Use generic client
 		aiClient = mcp.NewClient()
@@ -639,4 +657,3 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 
 	return response, nil
 }
-
