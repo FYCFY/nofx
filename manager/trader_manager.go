@@ -717,6 +717,12 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		traderConfig.CustomAPIKey = string(aiModelCfg.APIKey)
 	}
 
+	if aiModelCfg.Provider == "openai" && strings.TrimSpace(aiModelCfg.AuthMode) == "codex_oauth" {
+		if token := strings.TrimSpace(string(aiModelCfg.OAuthAccessToken)); token != "" {
+			traderConfig.CustomAPIKey = token
+		}
+	}
+
 	// Create trader instance
 	at, err := trader.NewAutoTrader(traderConfig, st, traderCfg.UserID)
 	if err != nil {

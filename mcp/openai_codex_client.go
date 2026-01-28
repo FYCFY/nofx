@@ -73,6 +73,22 @@ func (c *OpenAICodexClient) SetTokenProvider(provider TokenProvider) {
 	c.tokenProvider = provider
 }
 
+// CallWithMessages ensures OAuth token is ready before delegating to base client.
+func (c *OpenAICodexClient) CallWithMessages(systemPrompt, userPrompt string) (string, error) {
+	if err := c.ensureToken(); err != nil {
+		return "", err
+	}
+	return c.Client.CallWithMessages(systemPrompt, userPrompt)
+}
+
+// CallWithRequest ensures OAuth token is ready before delegating to base client.
+func (c *OpenAICodexClient) CallWithRequest(req *Request) (string, error) {
+	if err := c.ensureToken(); err != nil {
+		return "", err
+	}
+	return c.Client.CallWithRequest(req)
+}
+
 func (c *OpenAICodexClient) ensureToken() error {
 	if c.tokenProvider != nil {
 		access, account, err := c.tokenProvider()

@@ -855,6 +855,9 @@ func (s *Server) hydrateBacktestAIConfig(cfg *backtest.BacktestConfig) error {
 		cfg.AICfg.OAuthExpiresAt = *model.OAuthExpiresAt
 	}
 	cfg.AICfg.OAuthAccountID = strings.TrimSpace(model.OAuthAccountID)
+	if authMode == "codex_oauth" && cfg.AICfg.APIKey == "" {
+		cfg.AICfg.APIKey = cfg.AICfg.OAuthAccessToken
+	}
 	cfg.AICfg.BaseURL = strings.TrimSpace(model.CustomAPIURL)
 	modelName := strings.TrimSpace(model.CustomModelName)
 	if cfg.AICfg.Model == "" {
