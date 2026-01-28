@@ -205,7 +205,7 @@ func (c *OpenAICodexClient) parseMCPResponse(body []byte) (string, error) {
 		return "", fmt.Errorf("empty response body")
 	}
 
-	if strings.HasPrefix(text, "data:") {
+	if strings.HasPrefix(text, "data:") || strings.HasPrefix(text, "event:") || strings.Contains(text, "\ndata:") || strings.Contains(text, "\nevent:") {
 		return parseCodexSSE(text)
 	}
 
@@ -260,6 +260,10 @@ func parseCodexSSE(sse string) (string, error) {
 func parseCodexJSON(body []byte) (string, error) {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
+		text := strings.TrimSpace(string(body))
+		if strings.HasPrefix(text, "data:") || strings.HasPrefix(text, "event:") || strings.Contains(text, "\ndata:") || strings.Contains(text, "\nevent:") {
+			return parseCodexSSE(text)
+		}
 		return "", fmt.Errorf("failed to parse codex json response: %w", err)
 	}
 	if response, ok := payload["response"].(map[string]interface{}); ok {
