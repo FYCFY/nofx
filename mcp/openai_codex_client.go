@@ -49,6 +49,7 @@ func NewOpenAICodexClientWithOptions(opts ...ClientOption) AIClient {
 // SetAPIKey sets access token for Codex OAuth (apiKey parameter is treated as access token).
 func (c *OpenAICodexClient) SetAPIKey(apiKey string, customURL string, customModel string) {
 	c.AccessToken = apiKey
+	c.APIKey = apiKey
 	if customURL != "" {
 		c.BaseURL = customURL
 	}
@@ -60,6 +61,7 @@ func (c *OpenAICodexClient) SetAPIKey(apiKey string, customURL string, customMod
 // SetOAuthTokens sets OAuth tokens and optional refresh callback.
 func (c *OpenAICodexClient) SetOAuthTokens(accessToken, refreshToken string, expiresAt time.Time, accountID string, onRefresh func(tokens OAuthTokens) error) {
 	c.AccessToken = accessToken
+	c.APIKey = accessToken
 	c.RefreshToken = refreshToken
 	c.ExpiresAt = expiresAt
 	c.AccountID = accountID
@@ -78,6 +80,7 @@ func (c *OpenAICodexClient) ensureToken() error {
 			return err
 		}
 		c.AccessToken = access
+		c.APIKey = access
 		c.AccountID = account
 		return nil
 	}
@@ -85,6 +88,7 @@ func (c *OpenAICodexClient) ensureToken() error {
 	if c.AccessToken == "" {
 		return fmt.Errorf("codex oauth access token missing")
 	}
+	c.APIKey = c.AccessToken
 
 	if c.RefreshToken != "" && !c.ExpiresAt.IsZero() {
 		if time.Now().After(c.ExpiresAt.Add(-2 * time.Minute)) {
@@ -93,6 +97,7 @@ func (c *OpenAICodexClient) ensureToken() error {
 				return err
 			}
 			c.AccessToken = refreshed.AccessToken
+			c.APIKey = refreshed.AccessToken
 			c.RefreshToken = refreshed.RefreshToken
 			c.ExpiresAt = refreshed.ExpiresAt
 			if c.onRefresh != nil {
