@@ -622,7 +622,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               ? {
                 ...m,
                 apiKey,
-                customApiUrl: customApiUrl || '',
+                customApiUrl:
+                  authMode === 'codex_oauth' ? '' : customApiUrl || '',
                 customModelName: customModelName || '',
                 authMode: authMode || m.authMode || 'api_key',
                 enabled: true,
@@ -634,7 +635,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         const newModel = {
           ...modelToUpdate,
           apiKey,
-          customApiUrl: customApiUrl || '',
+          customApiUrl:
+            authMode === 'codex_oauth' ? '' : customApiUrl || '',
           customModelName: customModelName || '',
           authMode: authMode || modelToUpdate.authMode || 'api_key',
           enabled: true,
@@ -1757,9 +1759,14 @@ function ModelConfigModal({
                       border: '1px solid #2B3139',
                       color: '#EAECEF',
                     }}
+                    disabled={selectedModel.provider === 'openai' && authMode === 'codex_oauth'}
                   />
                   <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
-                    {t('leaveBlankForDefault', language)}
+                    {selectedModel.provider === 'openai' && authMode === 'codex_oauth'
+                      ? language === 'zh'
+                        ? 'Codex OAuth 模式固定使用 ChatGPT 后端，不支持自定义 URL'
+                        : 'Codex OAuth uses ChatGPT backend and does not support custom URL'
+                      : t('leaveBlankForDefault', language)}
                   </div>
                 </div>
 

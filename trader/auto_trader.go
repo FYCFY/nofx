@@ -202,7 +202,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 			mcpClient = mcp.NewOpenAICodexClient()
 			if concrete, ok := mcpClient.(*mcp.OpenAICodexClient); ok {
 				concrete.SetTokenProvider(ai.OpenAICodexTokenProvider(st, userID, config.AIModelID))
-				concrete.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
+				concrete.SetAPIKey(config.CustomAPIKey, "", config.CustomModelName)
 			}
 			logger.Infof("🤖 [%s] Using OpenAI Codex (OAuth)", config.Name)
 		} else {

@@ -636,7 +636,7 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 			codexClient := mcp.NewOpenAICodexClient()
 			if concrete, ok := codexClient.(*mcp.OpenAICodexClient); ok {
 				concrete.SetTokenProvider(ai.OpenAICodexTokenProvider(s.store, userID, model.ID))
-				concrete.SetAPIKey(string(model.OAuthAccessToken), model.CustomAPIURL, model.CustomModelName)
+				concrete.SetAPIKey(string(model.OAuthAccessToken), "", model.CustomModelName)
 			}
 			aiClient = codexClient
 		} else {

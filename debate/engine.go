@@ -93,7 +93,7 @@ func (e *DebateEngine) InitializeClients(participants []*store.DebateParticipant
 				client = mcp.NewOpenAICodexClient()
 				if concrete, ok := client.(*mcp.OpenAICodexClient); ok {
 					concrete.SetTokenProvider(ai.OpenAICodexTokenProviderWithStore(e.aiModelStore, aiModel.UserID, aiModel.ID))
-					concrete.SetAPIKey(string(aiModel.OAuthAccessToken), aiModel.CustomAPIURL, aiModel.CustomModelName)
+					concrete.SetAPIKey(string(aiModel.OAuthAccessToken), "", aiModel.CustomModelName)
 				}
 			} else {
 				client = mcp.NewOpenAIClient()
@@ -113,7 +113,7 @@ func (e *DebateEngine) InitializeClients(participants []*store.DebateParticipant
 		// Configure client (convert EncryptedString to string)
 		if aiModel.Provider == "openai" && strings.TrimSpace(aiModel.AuthMode) == "codex_oauth" {
 			if concrete, ok := client.(*mcp.OpenAICodexClient); ok {
-				concrete.SetAPIKey(string(aiModel.OAuthAccessToken), aiModel.CustomAPIURL, aiModel.CustomModelName)
+				concrete.SetAPIKey(string(aiModel.OAuthAccessToken), "", aiModel.CustomModelName)
 			}
 		} else {
 			client.SetAPIKey(string(aiModel.APIKey), aiModel.CustomAPIURL, aiModel.CustomModelName)

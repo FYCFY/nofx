@@ -78,8 +78,8 @@ func configureMCPClient(cfg BacktestConfig, base mcp.AIClient) (mcp.AIClient, er
 				cfg.AICfg.OAuthAccountID,
 				nil,
 			)
-			if cfg.AICfg.BaseURL != "" || cfg.AICfg.Model != "" {
-				codex.SetAPIKey(cfg.AICfg.OAuthAccessToken, cfg.AICfg.BaseURL, cfg.AICfg.Model)
+			if cfg.AICfg.Model != "" {
+				codex.SetAPIKey(cfg.AICfg.OAuthAccessToken, "", cfg.AICfg.Model)
 			}
 			return codex, nil
 		}
