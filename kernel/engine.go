@@ -48,6 +48,8 @@ type PositionInfo struct {
 	UnrealizedPnL    float64 `json:"unrealized_pnl"`
 	UnrealizedPnLPct float64 `json:"unrealized_pnl_pct"`
 	PeakPnLPct       float64 `json:"peak_pnl_pct"` // Historical peak profit percentage
+	StopLoss         float64 `json:"stop_loss"`    // Stop-loss price
+	TakeProfit       float64 `json:"take_profit"`  // Take-profit price
 	LiquidationPrice float64 `json:"liquidation_price"`
 	MarginUsed       float64 `json:"margin_used"`
 	UpdateTime       int64   `json:"update_time"` // Position update timestamp (milliseconds)
@@ -123,26 +125,26 @@ type PendingOrder struct {
 
 // Context trading context (complete information passed to AI)
 type Context struct {
-	CurrentTime     string                             `json:"current_time"`
-	RuntimeMinutes  int                                `json:"runtime_minutes"`
-	CallCount       int                                `json:"call_count"`
-	Account         AccountInfo                        `json:"account"`
-	Positions       []PositionInfo                     `json:"positions"`
-	CandidateCoins  []CandidateCoin                    `json:"candidate_coins"`
-	PromptVariant   string                             `json:"prompt_variant,omitempty"`
-	TradingStats    *TradingStats                      `json:"trading_stats,omitempty"`
-	RecentOrders    []RecentOrder                      `json:"recent_orders,omitempty"`
-	OpenOrders      []PendingOrder                     `json:"open_orders,omitempty"`
-	MarketDataMap   map[string]*market.Data            `json:"-"`
-	MultiTFMarket   map[string]map[string]*market.Data `json:"-"`
-	OITopDataMap    map[string]*OITopData              `json:"-"`
-	QuantDataMap    map[string]*QuantData              `json:"-"`
-	OIRankingData      *nofxos.OIRankingData      `json:"-"` // Market-wide OI ranking data
-	NetFlowRankingData *nofxos.NetFlowRankingData `json:"-"` // Market-wide fund flow ranking data
-	PriceRankingData   *nofxos.PriceRankingData   `json:"-"` // Market-wide price gainers/losers
-	BTCETHLeverage     int                          `json:"-"`
-	AltcoinLeverage int                                `json:"-"`
-	Timeframes      []string                           `json:"-"`
+	CurrentTime        string                             `json:"current_time"`
+	RuntimeMinutes     int                                `json:"runtime_minutes"`
+	CallCount          int                                `json:"call_count"`
+	Account            AccountInfo                        `json:"account"`
+	Positions          []PositionInfo                     `json:"positions"`
+	CandidateCoins     []CandidateCoin                    `json:"candidate_coins"`
+	PromptVariant      string                             `json:"prompt_variant,omitempty"`
+	TradingStats       *TradingStats                      `json:"trading_stats,omitempty"`
+	RecentOrders       []RecentOrder                      `json:"recent_orders,omitempty"`
+	OpenOrders         []PendingOrder                     `json:"open_orders,omitempty"`
+	MarketDataMap      map[string]*market.Data            `json:"-"`
+	MultiTFMarket      map[string]map[string]*market.Data `json:"-"`
+	OITopDataMap       map[string]*OITopData              `json:"-"`
+	QuantDataMap       map[string]*QuantData              `json:"-"`
+	OIRankingData      *nofxos.OIRankingData              `json:"-"` // Market-wide OI ranking data
+	NetFlowRankingData *nofxos.NetFlowRankingData         `json:"-"` // Market-wide fund flow ranking data
+	PriceRankingData   *nofxos.PriceRankingData           `json:"-"` // Market-wide price gainers/losers
+	BTCETHLeverage     int                                `json:"-"`
+	AltcoinLeverage    int                                `json:"-"`
+	Timeframes         []string                           `json:"-"`
 }
 
 // Decision AI trading decision
@@ -192,14 +194,14 @@ type Decision struct {
 	TakeProfit      float64 `json:"take_profit,omitempty"`
 
 	// Limit order parameters (grid and non-grid)
-	Price      float64 `json:"price,omitempty"`       // Limit order price (for grid)
-	Quantity   float64 `json:"quantity,omitempty"`    // Order quantity (for grid)
-	LevelIndex int     `json:"level_index,omitempty"` // Grid level index
-	OrderID    FlexibleString `json:"order_id,omitempty"` // Order ID (for cancel)
-	ClientID   string  `json:"client_id,omitempty"`   // Client order ID (for tracking/cancel)
-	PostOnly   bool    `json:"post_only,omitempty"`   // Maker-only limit order
-	ReduceOnly bool    `json:"reduce_only,omitempty"` // Reduce-only order
-	PositionSide string `json:"position_side,omitempty"` // Optional position side (LONG/SHORT)
+	Price        float64        `json:"price,omitempty"`         // Limit order price (for grid)
+	Quantity     float64        `json:"quantity,omitempty"`      // Order quantity (for grid)
+	LevelIndex   int            `json:"level_index,omitempty"`   // Grid level index
+	OrderID      FlexibleString `json:"order_id,omitempty"`      // Order ID (for cancel)
+	ClientID     string         `json:"client_id,omitempty"`     // Client order ID (for tracking/cancel)
+	PostOnly     bool           `json:"post_only,omitempty"`     // Maker-only limit order
+	ReduceOnly   bool           `json:"reduce_only,omitempty"`   // Reduce-only order
+	PositionSide string         `json:"position_side,omitempty"` // Optional position side (LONG/SHORT)
 
 	// Common parameters
 	Confidence int     `json:"confidence,omitempty"` // Confidence level (0-100)
@@ -1413,9 +1415,17 @@ func (e *StrategyEngine) formatPositionInfo(index int, pos PositionInfo, ctx *Co
 		positionValue = -positionValue
 	}
 
-	sb.WriteString(fmt.Sprintf("%d. %s %s | Entry %.4f Current %.4f | Qty %.4f | Position Value %.2f USDT | PnL%+.2f%% | PnL Amount%+.2f USDT | Peak PnL%.2f%% | Leverage %dx | Margin %.0f | Liq Price %.4f%s\n\n",
+	stopInfo := ""
+	if pos.StopLoss > 0 {
+		stopInfo = fmt.Sprintf(" | SL %.4f", pos.StopLoss)
+	}
+	if pos.TakeProfit > 0 {
+		stopInfo += fmt.Sprintf(" | TP %.4f", pos.TakeProfit)
+	}
+
+	sb.WriteString(fmt.Sprintf("%d. %s %s | Entry %.4f Current %.4f%s | Qty %.4f | Position Value %.2f USDT | PnL%+.2f%% | PnL Amount%+.2f USDT | Peak PnL%.2f%% | Leverage %dx | Margin %.0f | Liq Price %.4f%s\n\n",
 		index, pos.Symbol, strings.ToUpper(pos.Side),
-		pos.EntryPrice, pos.MarkPrice, pos.Quantity, positionValue, pos.UnrealizedPnLPct, pos.UnrealizedPnL, pos.PeakPnLPct,
+		pos.EntryPrice, pos.MarkPrice, stopInfo, pos.Quantity, positionValue, pos.UnrealizedPnLPct, pos.UnrealizedPnL, pos.PeakPnLPct,
 		pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
 
 	if marketData, ok := ctx.MarketDataMap[pos.Symbol]; ok {
@@ -1963,17 +1973,17 @@ func validateDecisions(decisions []Decision, accountEquity float64, btcEthLevera
 
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, btcEthPosRatio, altcoinPosRatio, minRiskRewardRatio float64) error {
 	validActions := map[string]bool{
-		"open_long":        true,
-		"open_short":       true,
-		"close_long":       true,
-		"close_short":      true,
-		"hold":             true,
-		"wait":             true,
-		"place_limit_buy":  true,
-		"place_limit_sell": true,
-		"cancel_order":     true,
-		"cancel_all_orders": true,
-		"update_stop_loss": true,
+		"open_long":          true,
+		"open_short":         true,
+		"close_long":         true,
+		"close_short":        true,
+		"hold":               true,
+		"wait":               true,
+		"place_limit_buy":    true,
+		"place_limit_sell":   true,
+		"cancel_order":       true,
+		"cancel_all_orders":  true,
+		"update_stop_loss":   true,
 		"update_take_profit": true,
 	}
 

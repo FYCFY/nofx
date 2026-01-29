@@ -240,8 +240,19 @@ func formatCurrentPositionsZH(ctx *Context) string {
 		// 计算回撤
 		drawdown := pos.UnrealizedPnLPct - pos.PeakPnLPct
 
+		stopInfo := ""
+		if pos.StopLoss > 0 {
+			stopInfo = fmt.Sprintf("止损 %.4f | ", pos.StopLoss)
+		}
+		if pos.TakeProfit > 0 {
+			stopInfo += fmt.Sprintf("止盈 %.4f | ", pos.TakeProfit)
+		}
+
 		sb.WriteString(fmt.Sprintf("%d. %s %s | ", i+1, pos.Symbol, strings.ToUpper(pos.Side)))
 		sb.WriteString(fmt.Sprintf("进场 %.4f 当前 %.4f | ", pos.EntryPrice, pos.MarkPrice))
+		if stopInfo != "" {
+			sb.WriteString(stopInfo)
+		}
 		sb.WriteString(fmt.Sprintf("数量 %.4f | ", pos.Quantity))
 		sb.WriteString(fmt.Sprintf("仓位价值 %.2f USDT | ", pos.Quantity*pos.MarkPrice))
 		sb.WriteString(fmt.Sprintf("盈亏 %+.2f%% | ", pos.UnrealizedPnLPct))
@@ -395,7 +406,6 @@ func formatKlineDataZH(symbol string, tfData map[string]*market.TimeframeSeriesD
 	return sb.String()
 }
 
-
 // getOIInterpretationZH 获取OI变化解读（中文）
 func getOIInterpretationZH(oiChange, priceChange string) string {
 	if oiChange == "增加" && priceChange == "上涨" {
@@ -538,8 +548,19 @@ func formatCurrentPositionsEN(ctx *Context) string {
 	for i, pos := range ctx.Positions {
 		drawdown := pos.UnrealizedPnLPct - pos.PeakPnLPct
 
+		stopInfo := ""
+		if pos.StopLoss > 0 {
+			stopInfo = fmt.Sprintf("SL %.4f | ", pos.StopLoss)
+		}
+		if pos.TakeProfit > 0 {
+			stopInfo += fmt.Sprintf("TP %.4f | ", pos.TakeProfit)
+		}
+
 		sb.WriteString(fmt.Sprintf("%d. %s %s | ", i+1, pos.Symbol, strings.ToUpper(pos.Side)))
 		sb.WriteString(fmt.Sprintf("Entry %.4f Current %.4f | ", pos.EntryPrice, pos.MarkPrice))
+		if stopInfo != "" {
+			sb.WriteString(stopInfo)
+		}
 		sb.WriteString(fmt.Sprintf("Qty %.4f | ", pos.Quantity))
 		sb.WriteString(fmt.Sprintf("Value %.2f USDT | ", pos.Quantity*pos.MarkPrice))
 		sb.WriteString(fmt.Sprintf("PnL %+.2f%% | ", pos.UnrealizedPnLPct))
@@ -690,7 +711,6 @@ func formatKlineDataEN(symbol string, tfData map[string]*market.TimeframeSeriesD
 
 	return sb.String()
 }
-
 
 // getOIInterpretationEN 获取OI变化解读（英文）
 func getOIInterpretationEN(oiChange, priceChange string) string {

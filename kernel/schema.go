@@ -167,6 +167,20 @@ var DataDictionary = map[string]map[string]BilingualFieldDef{
 			DescZH:    "负值表示正在回撤。例如：峰值+5%，当前+3%，回撤=-2%",
 			DescEN:    "Negative = pulling back. E.g., Peak +5%, Current +3%, Drawdown = -2%",
 		},
+		"StopLoss": {
+			NameZH: "止损价格",
+			NameEN: "Stop Loss Price",
+			Unit:   "USDT",
+			DescZH: "当前持仓的止损触发价格",
+			DescEN: "Stop-loss trigger price for current position",
+		},
+		"TakeProfit": {
+			NameZH: "止盈价格",
+			NameEN: "Take Profit Price",
+			Unit:   "USDT",
+			DescZH: "当前持仓的止盈触发价格",
+			DescEN: "Take-profit trigger price for current position",
+		},
 		"Leverage": {
 			NameZH: "杠杆倍数",
 			NameEN: "Leverage",

@@ -3,6 +3,7 @@ package notify
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"nofx/store"
@@ -42,6 +43,45 @@ type TradeInfo struct {
 	Time        time.Time
 }
 
+type OpenTradeInfo struct {
+	Symbol   string
+	Side     string // BUY/SELL
+	Price    float64
+	Quantity float64
+	Leverage int
+	Time     time.Time
+}
+
+type closeTradeDeduper struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+	ttl  time.Duration
+}
+
+func (d *closeTradeDeduper) allow(key string) bool {
+	if d == nil {
+		return true
+	}
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for k, ts := range d.seen {
+		if now.Sub(ts) > d.ttl {
+			delete(d.seen, k)
+		}
+	}
+	if ts, ok := d.seen[key]; ok && now.Sub(ts) <= d.ttl {
+		return false
+	}
+	d.seen[key] = now
+	return true
+}
+
+var closeDeduper = &closeTradeDeduper{
+	seen: make(map[string]time.Time),
+	ttl:  5 * time.Minute,
+}
+
 // NotifyLimitFill notifies limit order fill
 func NotifyLimitFill(userID, traderID, symbol, side string, price, qty float64) {
 	svc := get()
@@ -56,6 +96,22 @@ func NotifyLimitFill(userID, traderID, symbol, side string, price, qty float64) 
 	_ = svc.sender.SendMessage(userID, msg)
 }
 
+// NotifyOpenTrade notifies market open trade
+func NotifyOpenTrade(userID, traderID string, trade OpenTradeInfo) {
+	svc := get()
+	if svc == nil || svc.sender == nil {
+		return
+	}
+	name := svc.traderName(traderID)
+	direction := "开多"
+	if strings.ToUpper(trade.Side) == "SELL" {
+		direction = "开空"
+	}
+	msg := fmt.Sprintf("市价开仓 ✅\n交易员: %s\n品种: %s\n方向: %s\n价格: %.4f\n数量: %.4f\n杠杆: %dx\n时间: %s",
+		name, trade.Symbol, direction, trade.Price, trade.Quantity, trade.Leverage, trade.Time.Format("2006-01-02 15:04:05"))
+	_ = svc.sender.SendMessage(userID, msg)
+}
+
 // NotifyCloseTrade notifies close trade (stop loss / take profit / close)
 func NotifyCloseTrade(userID, traderID string, trade TradeInfo) {
 	svc := get()
@@ -63,6 +119,11 @@ func NotifyCloseTrade(userID, traderID string, trade TradeInfo) {
 		return
 	}
 	if trade.OrderAction != "close_long" && trade.OrderAction != "close_short" {
+		return
+	}
+	key := fmt.Sprintf("%s|%s|%s|%s|%.6f",
+		userID, traderID, trade.OrderAction, trade.Symbol, trade.Quantity)
+	if !closeDeduper.allow(key) {
 		return
 	}
 	name := svc.traderName(traderID)

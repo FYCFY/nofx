@@ -368,6 +368,11 @@ func (t *FuturesTrader) determineOrderAction(side, positionSide string, realized
 func (t *FuturesTrader) StartOrderSync(traderID string, exchangeID string, exchangeType string, st *store.Store, interval time.Duration) {
 	// Run first sync immediately
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("❌ Binance order sync panic recovered (initial): %v", r)
+			}
+		}()
 		logger.Infof("🔄 Running initial Binance order sync...")
 		if err := t.SyncOrdersFromBinance(traderID, exchangeID, exchangeType, st); err != nil {
 			logger.Infof("⚠️  Initial Binance order sync failed: %v", err)
@@ -377,6 +382,13 @@ func (t *FuturesTrader) StartOrderSync(traderID string, exchangeID string, excha
 	// Then run periodically
 	ticker := time.NewTicker(interval)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("❌ Binance order sync panic recovered (ticker): %v", r)
+				ticker.Stop()
+				go t.StartOrderSync(traderID, exchangeID, exchangeType, st, interval)
+			}
+		}()
 		for range ticker.C {
 			if err := t.SyncOrdersFromBinance(traderID, exchangeID, exchangeType, st); err != nil {
 				logger.Infof("⚠️  Binance order sync failed: %v", err)

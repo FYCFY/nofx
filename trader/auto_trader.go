@@ -862,6 +862,9 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		}
 	}
 
+	// Enrich positions with stop-loss / take-profit from exchange open orders
+	at.applyStopTargetsToPositions(positionInfos)
+
 	// 3. Use strategy engine to get candidate coins (must have strategy engine)
 	if at.strategyEngine == nil {
 		return nil, fmt.Errorf("trader has no strategy engine configured")
@@ -1127,6 +1130,118 @@ func (at *AutoTrader) collectOpenLimitOrdersFromExchange(openOrders []OpenOrder)
 	return orders
 }
 
+func (at *AutoTrader) applyStopTargetsToPositions(positions []kernel.PositionInfo) {
+	if len(positions) == 0 {
+		return
+	}
+
+	symbolSet := make(map[string]bool)
+	for _, pos := range positions {
+		symbolSet[market.Normalize(pos.Symbol)] = true
+	}
+
+	openOrders := at.getOpenOrdersRawForSymbols(symbolSet)
+	if len(openOrders) == 0 {
+		return
+	}
+
+	slMap, tpMap := buildStopTargetMaps(openOrders)
+	for i := range positions {
+		key := stopTargetKey(positions[i].Symbol, positions[i].Side)
+		if price, ok := slMap[key]; ok {
+			positions[i].StopLoss = price
+		}
+		if price, ok := tpMap[key]; ok {
+			positions[i].TakeProfit = price
+		}
+	}
+}
+
+func (at *AutoTrader) getOpenOrdersRawForSymbols(symbolSet map[string]bool) []OpenOrder {
+	openOrders := make([]OpenOrder, 0)
+
+	if allGetter, ok := at.trader.(OpenOrdersAllGetter); ok {
+		orders, err := allGetter.GetOpenOrdersAll()
+		if err == nil {
+			return orders
+		}
+		logger.Warnf("[%s] Failed to get all open orders: %v", at.name, err)
+	}
+
+	for symbol := range symbolSet {
+		orders, err := at.trader.GetOpenOrders(symbol)
+		if err != nil {
+			logger.Warnf("[%s] Failed to get open orders for %s: %v", at.name, symbol, err)
+			continue
+		}
+		openOrders = append(openOrders, orders...)
+	}
+
+	return openOrders
+}
+
+func buildStopTargetMaps(openOrders []OpenOrder) (map[string]float64, map[string]float64) {
+	slMap := make(map[string]float64)
+	tpMap := make(map[string]float64)
+
+	for _, order := range openOrders {
+		orderType := strings.ToUpper(order.Type)
+		if !isStopLossOrderType(orderType) && !isTakeProfitOrderType(orderType) {
+			continue
+		}
+
+		positionSide := strings.ToUpper(order.PositionSide)
+		if positionSide == "" {
+			positionSide = inferPositionSideFromOrder(order)
+		}
+		if positionSide != "LONG" && positionSide != "SHORT" {
+			continue
+		}
+
+		price := order.StopPrice
+		if price <= 0 {
+			price = order.Price
+		}
+		if price <= 0 {
+			continue
+		}
+
+		key := stopTargetKey(order.Symbol, positionSide)
+		if isTakeProfitOrderType(orderType) {
+			tpMap[key] = price
+		} else if isStopLossOrderType(orderType) {
+			slMap[key] = price
+		}
+	}
+
+	return slMap, tpMap
+}
+
+func stopTargetKey(symbol, side string) string {
+	return market.Normalize(symbol) + "|" + strings.ToUpper(side)
+}
+
+func isStopLossOrderType(orderType string) bool {
+	orderType = strings.ToUpper(orderType)
+	return strings.Contains(orderType, "STOP") && !strings.Contains(orderType, "TAKE_PROFIT")
+}
+
+func isTakeProfitOrderType(orderType string) bool {
+	orderType = strings.ToUpper(orderType)
+	return strings.Contains(orderType, "TAKE_PROFIT")
+}
+
+func inferPositionSideFromOrder(order OpenOrder) string {
+	side := strings.ToUpper(order.Side)
+	if side == "SELL" {
+		return "LONG"
+	}
+	if side == "BUY" {
+		return "SHORT"
+	}
+	return ""
+}
+
 func (at *AutoTrader) GetOpenLimitOrdersSnapshot(symbol string) ([]kernel.PendingOrder, error) {
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -1340,6 +1455,17 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		logger.Infof("  ⚠ Failed to set take profit: %v", err)
 	}
 
+	if at.userID != "" {
+		notify.NotifyOpenTrade(at.userID, at.id, notify.OpenTradeInfo{
+			Symbol:   decision.Symbol,
+			Side:     "BUY",
+			Price:    marketData.CurrentPrice,
+			Quantity: quantity,
+			Leverage: decision.Leverage,
+			Time:     time.Now(),
+		})
+	}
+
 	return nil
 }
 
@@ -1455,6 +1581,17 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 	}
 	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
 		logger.Infof("  ⚠ Failed to set take profit: %v", err)
+	}
+
+	if at.userID != "" {
+		notify.NotifyOpenTrade(at.userID, at.id, notify.OpenTradeInfo{
+			Symbol:   decision.Symbol,
+			Side:     "SELL",
+			Price:    marketData.CurrentPrice,
+			Quantity: quantity,
+			Leverage: decision.Leverage,
+			Time:     time.Now(),
+		})
 	}
 
 	return nil
@@ -1756,6 +1893,18 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *kernel.Decision, acti
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_long", quantity, marketData.CurrentPrice, 0, entryPrice)
 
+	if at.userID != "" {
+		notify.NotifyCloseTrade(at.userID, at.id, notify.TradeInfo{
+			Symbol:      decision.Symbol,
+			OrderAction: "close_long",
+			Side:        "SELL",
+			Price:       marketData.CurrentPrice,
+			Quantity:    quantity,
+			RealizedPnL: 0,
+			Time:        time.Now().UTC(),
+		})
+	}
+
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
 }
@@ -1819,6 +1968,18 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *kernel.Decision, act
 
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_short", quantity, marketData.CurrentPrice, 0, entryPrice)
+
+	if at.userID != "" {
+		notify.NotifyCloseTrade(at.userID, at.id, notify.TradeInfo{
+			Symbol:      decision.Symbol,
+			OrderAction: "close_short",
+			Side:        "BUY",
+			Price:       marketData.CurrentPrice,
+			Quantity:    quantity,
+			RealizedPnL: 0,
+			Time:        time.Now().UTC(),
+		})
+	}
 
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
