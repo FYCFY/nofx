@@ -381,6 +381,10 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 // Run runs the automatic trading main loop
 func (at *AutoTrader) Run() error {
 	at.isRunningMutex.Lock()
+	if at.isRunning {
+		at.isRunningMutex.Unlock()
+		return fmt.Errorf("trader already running")
+	}
 	at.isRunning = true
 	at.isRunningMutex.Unlock()
 
