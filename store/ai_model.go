@@ -277,6 +277,8 @@ func (s *AIModelStore) Update(userID, id string, enabled bool, apiKey, customAPI
 			name = "DeepSeek AI"
 		} else if provider == "qwen" {
 			name = "Qwen AI"
+		} else if provider == "minmax" {
+			name = "minmax"
 		} else {
 			name = provider + " AI"
 		}

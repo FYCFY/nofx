@@ -631,6 +631,9 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 	case "grok":
 		aiClient = mcp.NewGrokClient()
 		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+	case "minmax":
+		aiClient = mcp.NewMinmaxClient()
+		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
 	case "openai":
 		if authMode == "codex_oauth" {
 			codexClient := mcp.NewOpenAICodexClient()

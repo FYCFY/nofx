@@ -64,6 +64,13 @@ func configureMCPClient(cfg BacktestConfig, base mcp.AIClient) (mcp.AIClient, er
 		grokC := mcp.NewGrokClientWithOptions()
 		grokC.(*mcp.GrokClient).SetAPIKey(cfg.AICfg.APIKey, cfg.AICfg.BaseURL, cfg.AICfg.Model)
 		return grokC, nil
+	case "minmax":
+		if cfg.AICfg.APIKey == "" {
+			return nil, fmt.Errorf("minmax provider requires api key")
+		}
+		mm := mcp.NewMinmaxClientWithOptions()
+		mm.(*mcp.MinmaxClient).SetAPIKey(cfg.AICfg.APIKey, cfg.AICfg.BaseURL, cfg.AICfg.Model)
+		return mm, nil
 	case "openai":
 		if cfg.AICfg.AuthMode == "codex_oauth" {
 			if cfg.AICfg.OAuthAccessToken == "" {
@@ -134,6 +141,11 @@ func cloneBaseClient(base mcp.AIClient) *mcp.Client {
 			return &cp
 		}
 	case *mcp.GrokClient:
+		if c != nil && c.Client != nil {
+			cp := *c.Client
+			return &cp
+		}
+	case *mcp.MinmaxClient:
 		if c != nil && c.Client != nil {
 			cp := *c.Client
 			return &cp

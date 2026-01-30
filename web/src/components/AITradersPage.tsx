@@ -44,6 +44,8 @@ function getModelDisplayName(modelId: string): string {
       return 'Qwen'
     case 'claude':
       return 'Claude'
+    case 'minmax':
+      return 'minmax'
     default:
       return modelId.toUpperCase()
   }
@@ -95,6 +97,11 @@ const AI_PROVIDER_CONFIG: Record<string, {
     defaultModel: 'moonshot-v1-auto',
     apiUrl: 'https://platform.moonshot.ai/console/api-keys',
     apiName: 'Moonshot',
+  },
+  minmax: {
+    defaultModel: 'MiniMax-M2.1',
+    apiUrl: 'https://platform.minimaxi.com/',
+    apiName: 'minmax',
   },
 }
 

@@ -96,16 +96,17 @@ const STATUS_COLOR: Record<string, string> = {
 
 // AI Provider Avatar
 function AIAvatar({ name, size = 24 }: { name: string; size?: number }) {
-  const providers: Record<string, { bg: string; text: string; letter: string }> = {
-    claude: { bg: 'bg-orange-500', text: 'text-white', letter: 'C' },
-    deepseek: { bg: 'bg-blue-600', text: 'text-white', letter: 'D' },
-    gemini: { bg: 'bg-blue-400', text: 'text-white', letter: 'G' },
-    grok: { bg: 'bg-gray-700', text: 'text-white', letter: 'X' },
-    kimi: { bg: 'bg-purple-500', text: 'text-white', letter: 'K' },
-    qwen: { bg: 'bg-indigo-500', text: 'text-white', letter: 'Q' },
-    openai: { bg: 'bg-emerald-600', text: 'text-white', letter: 'O' },
-    gpt: { bg: 'bg-emerald-600', text: 'text-white', letter: 'O' },
-  }
+    const providers: Record<string, { bg: string; text: string; letter: string }> = {
+      claude: { bg: 'bg-orange-500', text: 'text-white', letter: 'C' },
+      deepseek: { bg: 'bg-blue-600', text: 'text-white', letter: 'D' },
+      gemini: { bg: 'bg-blue-400', text: 'text-white', letter: 'G' },
+      grok: { bg: 'bg-gray-700', text: 'text-white', letter: 'X' },
+      kimi: { bg: 'bg-purple-500', text: 'text-white', letter: 'K' },
+      qwen: { bg: 'bg-indigo-500', text: 'text-white', letter: 'Q' },
+      openai: { bg: 'bg-emerald-600', text: 'text-white', letter: 'O' },
+      minmax: { bg: 'bg-rose-600', text: 'text-white', letter: 'M' },
+      gpt: { bg: 'bg-emerald-600', text: 'text-white', letter: 'O' },
+    }
   const lower = name.toLowerCase()
   const p = Object.entries(providers).find(([k]) => lower.includes(k))?.[1]
     || { bg: 'bg-gray-600', text: 'text-white', letter: name[0]?.toUpperCase() || '?' }

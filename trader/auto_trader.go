@@ -24,7 +24,7 @@ type AutoTraderConfig struct {
 	// Trader identification
 	ID         string // Trader unique identifier (for log directory, etc.)
 	Name       string // Trader display name
-	AIModel    string // AI model: "qwen" or "deepseek"
+	AIModel    string // AI model provider key (e.g. deepseek/qwen/openai/claude/minmax)
 	AIModelID  string // AI model config ID
 	AIAuthMode string // AI auth mode (e.g., api_key, codex_oauth)
 
@@ -196,6 +196,11 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		mcpClient = mcp.NewGrokClient()
 		mcpClient.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
 		logger.Infof("🤖 [%s] Using xAI Grok AI", config.Name)
+
+	case "minmax":
+		mcpClient = mcp.NewMinmaxClient()
+		mcpClient.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
+		logger.Infof("🤖 [%s] Using MinMax AI", config.Name)
 
 	case "openai":
 		if config.AIAuthMode == "codex_oauth" {

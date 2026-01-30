@@ -1659,6 +1659,7 @@ func (s *Server) handleGetModelConfigs(c *gin.Context) {
 			{ID: "gemini", Name: "Gemini AI", Provider: "gemini", Enabled: false, AuthMode: "api_key"},
 			{ID: "grok", Name: "Grok AI", Provider: "grok", Enabled: false, AuthMode: "api_key"},
 			{ID: "kimi", Name: "Kimi AI", Provider: "kimi", Enabled: false, AuthMode: "api_key"},
+			{ID: "minmax", Name: "minmax", Provider: "minmax", Enabled: false, AuthMode: "api_key"},
 		}
 		c.JSON(http.StatusOK, defaultModels)
 		return
@@ -3470,6 +3471,7 @@ func (s *Server) handleGetSupportedModels(c *gin.Context) {
 		{"id": "gemini", "name": "Google Gemini", "provider": "gemini", "defaultModel": "gemini-3-pro-preview"},
 		{"id": "grok", "name": "Grok (xAI)", "provider": "grok", "defaultModel": "grok-3-latest"},
 		{"id": "kimi", "name": "Kimi (Moonshot)", "provider": "kimi", "defaultModel": "moonshot-v1-auto"},
+		{"id": "minmax", "name": "minmax", "provider": "minmax", "defaultModel": "MiniMax-M2.1"},
 	}
 
 	c.JSON(http.StatusOK, supportedModels)
