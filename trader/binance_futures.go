@@ -59,6 +59,11 @@ type FuturesTrader struct {
 
 	// Cache validity period (15 seconds)
 	cacheDuration time.Duration
+
+	// User data stream (WebSocket) state
+	userStreamMu        sync.RWMutex
+	userStreamActive    bool
+	userStreamLastEvent time.Time
 }
 
 // NewFuturesTrader creates futures trader
@@ -82,6 +87,9 @@ func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
 	if err := trader.setDualSidePosition(); err != nil {
 		logger.Infof("⚠️ Failed to set dual-side position mode: %v (ignore this warning if already in dual-side mode)", err)
 	}
+
+	// Start Binance user data stream (WebSocket) to avoid REST polling limits
+	trader.startUserStream()
 
 	return trader
 }
@@ -126,7 +134,7 @@ func syncBinanceServerTime(client *futures.Client) {
 func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	// First check if cache is valid
 	t.balanceCacheMutex.RLock()
-	if t.cachedBalance != nil && time.Since(t.balanceCacheTime) < t.cacheDuration {
+	if t.cachedBalance != nil && (t.isUserStreamFresh() || time.Since(t.balanceCacheTime) < t.cacheDuration) {
 		cacheAge := time.Since(t.balanceCacheTime)
 		t.balanceCacheMutex.RUnlock()
 		logger.Infof("✓ Using cached account balance (cache age: %.1f seconds ago)", cacheAge.Seconds())
@@ -139,6 +147,16 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	account, err := t.client.NewGetAccountService().Do(context.Background())
 	if err != nil {
 		logger.Infof("❌ Binance API call failed: %v", err)
+		if isRateLimitError(err) {
+			t.balanceCacheMutex.RLock()
+			if t.cachedBalance != nil {
+				cached := t.cachedBalance
+				t.balanceCacheMutex.RUnlock()
+				logger.Infof("⚠️ Returning cached balance due to rate limit")
+				return cached, nil
+			}
+			t.balanceCacheMutex.RUnlock()
+		}
 		return nil, fmt.Errorf("failed to get account info: %w", err)
 	}
 
@@ -165,7 +183,7 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	// First check if cache is valid
 	t.positionsCacheMutex.RLock()
-	if t.cachedPositions != nil && time.Since(t.positionsCacheTime) < t.cacheDuration {
+	if t.cachedPositions != nil && (t.isUserStreamFresh() || time.Since(t.positionsCacheTime) < t.cacheDuration) {
 		cacheAge := time.Since(t.positionsCacheTime)
 		t.positionsCacheMutex.RUnlock()
 		logger.Infof("✓ Using cached position information (cache age: %.1f seconds ago)", cacheAge.Seconds())
@@ -177,6 +195,16 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	logger.Infof("🔄 Cache expired, calling Binance API to get position information...")
 	positions, err := t.client.NewGetPositionRiskService().Do(context.Background())
 	if err != nil {
+		if isRateLimitError(err) {
+			t.positionsCacheMutex.RLock()
+			if t.cachedPositions != nil {
+				cached := t.cachedPositions
+				t.positionsCacheMutex.RUnlock()
+				logger.Infof("⚠️ Returning cached positions due to rate limit")
+				return cached, nil
+			}
+			t.positionsCacheMutex.RUnlock()
+		}
 		return nil, fmt.Errorf("failed to get positions: %w", err)
 	}
 
