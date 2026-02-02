@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"nofx/config"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
@@ -43,7 +45,7 @@ func BlacklistToken(token string, exp time.Time) {
 	if len(tokenBlacklist.items) > maxBlacklistEntries {
 		now := time.Now()
 		for t, e := range tokenBlacklist.items {
-			if now.After(e) {
+			if !e.IsZero() && now.After(e) {
 				delete(tokenBlacklist.items, t)
 			}
 		}
@@ -59,6 +61,9 @@ func IsTokenBlacklisted(token string) bool {
 	tokenBlacklist.Lock()
 	defer tokenBlacklist.Unlock()
 	if exp, ok := tokenBlacklist.items[token]; ok {
+		if exp.IsZero() {
+			return true
+		}
 		if time.Now().After(exp) {
 			delete(tokenBlacklist.items, token)
 			return false
@@ -113,11 +118,17 @@ func VerifyOTP(secret, code string) bool {
 
 // GenerateJWT generates JWT token
 func GenerateJWT(userID, email string) (string, error) {
+	cfg := config.Get()
+	var expiresAt *jwt.NumericDate
+	if cfg.JWTTTLHours > 0 {
+		expiresAt = jwt.NewNumericDate(time.Now().Add(time.Duration(cfg.JWTTTLHours) * time.Hour))
+	}
+
 	claims := Claims{
 		UserID: userID,
 		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // Expires in 24 hours
+			ExpiresAt: expiresAt,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 			Issuer:    "nofxAI",

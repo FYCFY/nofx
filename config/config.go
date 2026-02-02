@@ -17,6 +17,7 @@ type Config struct {
 	// Service configuration
 	APIServerPort       int
 	JWTSecret           string
+	JWTTTLHours         int // 0 = no expiration
 	RegistrationEnabled bool
 	MaxUsers            int // Maximum number of users allowed (0 = unlimited, default = 10)
 
@@ -69,6 +70,12 @@ func Init() {
 	}
 	if cfg.JWTSecret == "" {
 		cfg.JWTSecret = "default-jwt-secret-change-in-production"
+	}
+
+	if v := os.Getenv("JWT_TTL_HOURS"); v != "" {
+		if ttl, err := strconv.Atoi(v); err == nil && ttl >= 0 {
+			cfg.JWTTTLHours = ttl
+		}
 	}
 
 	if v := os.Getenv("REGISTRATION_ENABLED"); v != "" {
