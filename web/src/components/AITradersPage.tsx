@@ -400,6 +400,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         exchange_id: data.exchange_id,
         strategy_id: data.strategy_id,
         initial_balance: data.initial_balance,
+        target_futures_equity: data.target_futures_equity,
         scan_interval_minutes: data.scan_interval_minutes,
         is_cross_margin: data.is_cross_margin,
         show_in_competition: data.show_in_competition,
