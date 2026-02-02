@@ -2356,12 +2356,47 @@ func (at *AutoTrader) startDrawdownMonitor() {
 	}()
 }
 
+func (at *AutoTrader) getTakeProfitMapForPositions(positions []map[string]interface{}) map[string]float64 {
+	if len(positions) == 0 {
+		return nil
+	}
+
+	symbolSet := make(map[string]bool)
+	for _, pos := range positions {
+		if symbol, ok := pos["symbol"].(string); ok && symbol != "" {
+			symbolSet[market.Normalize(symbol)] = true
+		}
+	}
+
+	if len(symbolSet) == 0 {
+		return nil
+	}
+
+	openOrders := at.getOpenOrdersRawForSymbols(symbolSet)
+	if len(openOrders) == 0 {
+		return nil
+	}
+
+	_, tpMap := buildStopTargetMaps(openOrders)
+	if len(tpMap) == 0 {
+		return nil
+	}
+
+	return tpMap
+}
+
 // checkPositionDrawdown checks position drawdown situation
 func (at *AutoTrader) checkPositionDrawdown() {
 	// Get current positions
 	positions, err := at.trader.GetPositions()
 	if err != nil {
 		logger.Infof("❌ Drawdown monitoring: failed to get positions: %v", err)
+		return
+	}
+
+	tpMap := at.getTakeProfitMapForPositions(positions)
+	if len(tpMap) == 0 {
+		logger.Infof("📊 Drawdown monitoring: no take profit orders found, drawdown close disabled this cycle")
 		return
 	}
 
@@ -2375,6 +2410,12 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			quantity = -quantity // Short position quantity is negative, convert to positive
 		}
 
+		tpPrice, ok := tpMap[stopTargetKey(symbol, side)]
+		if !ok || tpPrice <= 0 {
+			logger.Infof("📊 Drawdown monitoring: %s %s skip (no take profit order)", symbol, side)
+			continue
+		}
+
 		// Calculate current P&L percentage
 		leverage := 10 // Default value
 		if lev, ok := pos["leverage"].(float64); ok {
@@ -2386,6 +2427,26 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			currentPnLPct = ((markPrice - entryPrice) / entryPrice) * float64(leverage) * 100
 		} else {
 			currentPnLPct = ((entryPrice - markPrice) / entryPrice) * float64(leverage) * 100
+		}
+
+		progress := 0.0
+		if side == "long" {
+			denom := tpPrice - entryPrice
+			if denom <= 0 {
+				logger.Infof("📊 Drawdown monitoring: %s %s skip (invalid take profit price)", symbol, side)
+				continue
+			}
+			progress = (markPrice - entryPrice) / denom
+		} else {
+			denom := entryPrice - tpPrice
+			if denom <= 0 {
+				logger.Infof("📊 Drawdown monitoring: %s %s skip (invalid take profit price)", symbol, side)
+				continue
+			}
+			progress = (entryPrice - markPrice) / denom
+		}
+		if progress < 0.4 {
+			continue
 		}
 
 		// Construct unique position identifier (distinguish long/short)
@@ -2411,10 +2472,10 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
 		}
 
-		// Check close position condition: profit > 5% and drawdown >= 40%
-		if currentPnLPct > 5.0 && drawdownPct >= 40.0 {
-			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | Current profit: %.2f%% | Peak profit: %.2f%% | Drawdown: %.2f%%",
-				symbol, side, currentPnLPct, peakPnLPct, drawdownPct)
+		// Check close position condition: progress >= 40% of TP target and drawdown >= 40%
+		if drawdownPct >= 40.0 {
+			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | Current profit: %.2f%% | Peak profit: %.2f%% | Drawdown: %.2f%% | TP progress: %.2f%%",
+				symbol, side, currentPnLPct, peakPnLPct, drawdownPct, progress*100)
 
 			// Execute close position
 			if err := at.emergencyClosePosition(symbol, side); err != nil {
@@ -2424,10 +2485,10 @@ func (at *AutoTrader) checkPositionDrawdown() {
 				// Clear cache for this position after closing
 				at.ClearPeakPnLCache(symbol, side)
 			}
-		} else if currentPnLPct > 5.0 {
+		} else if currentPnLPct > 0 {
 			// Record situations close to close position condition (for debugging)
-			logger.Infof("📊 Drawdown monitoring: %s %s | Profit: %.2f%% | Peak: %.2f%% | Drawdown: %.2f%%",
-				symbol, side, currentPnLPct, peakPnLPct, drawdownPct)
+			logger.Infof("📊 Drawdown monitoring: %s %s | Profit: %.2f%% | Peak: %.2f%% | Drawdown: %.2f%% | TP progress: %.2f%%",
+				symbol, side, currentPnLPct, peakPnLPct, drawdownPct, progress*100)
 		}
 	}
 }
