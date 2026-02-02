@@ -252,6 +252,8 @@ func (t *BitgetTrader) SyncOrdersFromBitget(traderID string, exchangeID string, 
 				Price:       trade.FillPrice,
 				Quantity:    trade.FillQty,
 				RealizedPnL: trade.ProfitLoss,
+				Fee:         trade.Fee,
+				OrderID:     trade.TradeID,
 				Time:        trade.ExecTime.UTC(),
 			})
 		}

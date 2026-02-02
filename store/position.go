@@ -330,6 +330,49 @@ func (s *PositionStore) GetClosedPositions(traderID string, limit int) ([]*Trade
 	return positions, nil
 }
 
+// GetClosedPositionByExitOrderID gets closed position by exit order ID
+func (s *PositionStore) GetClosedPositionByExitOrderID(traderID, exitOrderID string) (*TraderPosition, error) {
+	if exitOrderID == "" {
+		return nil, nil
+	}
+	var pos TraderPosition
+	err := s.db.Where("trader_id = ? AND exit_order_id = ? AND status = ?", traderID, exitOrderID, "CLOSED").
+		Order("exit_time DESC").
+		First(&pos).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pos.EntryQuantity == 0 {
+		pos.EntryQuantity = pos.Quantity
+	}
+	return &pos, nil
+}
+
+// GetLatestClosedPositionBySymbol gets most recent closed position for symbol/side
+func (s *PositionStore) GetLatestClosedPositionBySymbol(traderID, symbol, side string) (*TraderPosition, error) {
+	if traderID == "" || symbol == "" || side == "" {
+		return nil, nil
+	}
+	var pos TraderPosition
+	err := s.db.Where("trader_id = ? AND symbol = ? AND lower(side) = ? AND status = ?",
+		traderID, symbol, strings.ToLower(side), "CLOSED").
+		Order("exit_time DESC").
+		First(&pos).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pos.EntryQuantity == 0 {
+		pos.EntryQuantity = pos.Quantity
+	}
+	return &pos, nil
+}
+
 // GetAllOpenPositions gets all traders' open positions
 func (s *PositionStore) GetAllOpenPositions() ([]*TraderPosition, error) {
 	var positions []*TraderPosition

@@ -19,6 +19,8 @@ type TelegramConfigRequest struct {
 	BotToken        string `json:"bot_token"`
 	ChatID          string `json:"chat_id"`
 	DefaultTraderID string `json:"default_trader_id"`
+	EnabledTraderIDs []string          `json:"enabled_trader_ids"`
+	NotifyTypes      map[string]bool   `json:"notify_types"`
 }
 
 // handleGetTelegramConfig returns current telegram config
@@ -35,12 +37,26 @@ func (s *Server) handleGetTelegramConfig(c *gin.Context) {
 		"chat_id":           "",
 		"default_trader_id": "",
 		"bot_token_set":     false,
+		"enabled_trader_ids": []string{},
+		"notify_types":      map[string]bool{},
 	}
 	if setting != nil {
 		resp["enabled"] = setting.Enabled
 		resp["chat_id"] = setting.ChatID
 		resp["default_trader_id"] = setting.DefaultTraderID
 		resp["bot_token_set"] = strings.TrimSpace(string(setting.BotToken)) != ""
+		if strings.TrimSpace(setting.EnabledTraderIDs) != "" {
+			var ids []string
+			if err := json.Unmarshal([]byte(setting.EnabledTraderIDs), &ids); err == nil {
+				resp["enabled_trader_ids"] = ids
+			}
+		}
+		if strings.TrimSpace(setting.NotifyTypes) != "" {
+			var types map[string]bool
+			if err := json.Unmarshal([]byte(setting.NotifyTypes), &types); err == nil {
+				resp["notify_types"] = types
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, resp)
@@ -104,6 +120,16 @@ func (s *Server) handleUpdateTelegramConfig(c *gin.Context) {
 	setting.ChatID = strings.TrimSpace(req.ChatID)
 	setting.Enabled = req.Enabled
 	setting.DefaultTraderID = strings.TrimSpace(req.DefaultTraderID)
+	if req.EnabledTraderIDs != nil {
+		if data, err := json.Marshal(req.EnabledTraderIDs); err == nil {
+			setting.EnabledTraderIDs = string(data)
+		}
+	}
+	if req.NotifyTypes != nil {
+		if data, err := json.Marshal(req.NotifyTypes); err == nil {
+			setting.NotifyTypes = string(data)
+		}
+	}
 
 	if setting.Enabled && strings.TrimSpace(string(setting.BotToken)) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Bot Token 不能为空"})

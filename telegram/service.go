@@ -41,7 +41,6 @@ func NewService(st *store.Store, tm *manager.TraderManager, setting *store.Teleg
 }
 
 func (s *Service) Start() error {
-	go s.loopUpdates()
 	logger.Infof("📲 Telegram bot started for user %s", s.settings.UserID)
 	return nil
 }

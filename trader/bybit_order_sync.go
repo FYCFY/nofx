@@ -301,6 +301,8 @@ func (t *BybitTrader) SyncOrdersFromBybit(traderID string, exchangeID string, ex
 				Price:       trade.ExecPrice,
 				Quantity:    trade.ExecQty,
 				RealizedPnL: trade.ClosedPnL,
+				Fee:         trade.ExecFee,
+				OrderID:     trade.ExecID,
 				Time:        trade.ExecTime.UTC(),
 			})
 		}

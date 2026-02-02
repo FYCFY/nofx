@@ -278,6 +278,8 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 				Price:       trade.Price,
 				Quantity:    trade.Quantity,
 				RealizedPnL: trade.RealizedPnL,
+				Fee:         trade.Fee,
+				OrderID:     trade.TradeID,
 				Time:        trade.Time.UTC(),
 			})
 		}

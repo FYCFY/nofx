@@ -146,6 +146,8 @@ func (t *AsterTrader) SyncOrdersFromAster(traderID string, exchangeID string, ex
 				Price:       trade.Price,
 				Quantity:    trade.Quantity,
 				RealizedPnL: trade.RealizedPnL,
+				Fee:         trade.Fee,
+				OrderID:     trade.TradeID,
 				Time:        trade.Time.UTC(),
 			})
 		}

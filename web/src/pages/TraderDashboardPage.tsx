@@ -164,6 +164,17 @@ export function TraderDashboardPage({
     })
     const [notifySaving, setNotifySaving] = useState<boolean>(false)
 
+    const notifyTypeOptions = [
+        { key: 'limit_order_placed', label: '限价委托挂单' },
+        { key: 'limit_order_filled', label: '挂单开仓成功' },
+        { key: 'market_open', label: '市价开仓' },
+        { key: 'update_stop_loss', label: '更新止损' },
+        { key: 'update_take_profit', label: '更新止盈' },
+        { key: 'close_take_profit', label: '止盈触发' },
+        { key: 'close_stop_loss', label: '止损触发' },
+        { key: 'close_manual', label: '直接平仓' },
+    ]
+
     // Calculate paginated positions
     const totalPositions = positions?.length || 0
     const totalPositionPages = Math.ceil(totalPositions / positionsPageSize)
@@ -212,7 +223,6 @@ export function TraderDashboardPage({
     }, [selectedTraderId])
 
     useEffect(() => {
-        if (!selectedTraderId) return
         let isActive = true
 
         const loadTelegramConfig = async () => {
@@ -232,6 +242,16 @@ export function TraderDashboardPage({
             }
         }
 
+        loadTelegramConfig()
+        return () => {
+            isActive = false
+        }
+    }, [])
+
+    useEffect(() => {
+        if (!selectedTraderId) return
+        let isActive = true
+
         const loadNotifyRule = async () => {
             try {
                 const rule = await api.getTraderNotifyRule(selectedTraderId)
@@ -245,7 +265,6 @@ export function TraderDashboardPage({
             }
         }
 
-        loadTelegramConfig()
         loadNotifyRule()
         return () => {
             isActive = false
@@ -375,13 +394,13 @@ export function TraderDashboardPage({
     }
 
     const handleSaveTelegramConfig = async () => {
-        if (!selectedTraderId) return
         setTelegramSaving(true)
         try {
             const payload: any = {
                 enabled: !!telegramConfig.enabled,
                 chat_id: telegramConfig.chat_id || '',
-                default_trader_id: selectedTraderId,
+                enabled_trader_ids: telegramConfig.enabled_trader_ids || [],
+                notify_types: telegramConfig.notify_types || {},
             }
             const token = telegramBotTokenInput.trim()
             if (token) {
@@ -1142,78 +1161,161 @@ export function TraderDashboardPage({
                     </div>
                 )}
 
+                <div
+                    className="nofx-glass p-6 animate-slide-in"
+                    style={{ animationDelay: '0.3s' }}
+                >
+                    <div className="flex items-center justify-between mb-6">
+                        <h2 className="text-xl font-bold flex items-center gap-2 text-nofx-text-main">
+                            <span className="text-2xl">📲</span>
+                            Telegram 通知（全局）
+                        </h2>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                            <div className="text-sm text-nofx-text-muted">机器人配置（保存后自动启动）</div>
+                            <div className="flex items-center gap-3">
+                                <input
+                                    type="checkbox"
+                                    checked={!!telegramConfig.enabled}
+                                    onChange={(e) =>
+                                        setTelegramConfig((prev) => ({ ...prev, enabled: e.target.checked }))
+                                    }
+                                />
+                                <span className="text-sm text-nofx-text-main">启用 Telegram 通知</span>
+                            </div>
+                            <div>
+                                <label className="block text-xs text-nofx-text-muted mb-1">Bot Token</label>
+                                <input
+                                    type="password"
+                                    placeholder={telegramConfig.bot_token_set ? '已设置，输入可更新' : '请输入 Bot Token'}
+                                    value={telegramBotTokenInput}
+                                    onChange={(e) => setTelegramBotTokenInput(e.target.value)}
+                                    className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs text-nofx-text-muted mb-1">Chat ID</label>
+                                <input
+                                    type="text"
+                                    placeholder="例如：123456789"
+                                    value={telegramConfig.chat_id || ''}
+                                    onChange={(e) =>
+                                        setTelegramConfig((prev) => ({ ...prev, chat_id: e.target.value }))
+                                    }
+                                    className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
+                                />
+                            </div>
+
+                            <div>
+                                <div className="text-sm text-nofx-text-muted mb-2">启用通知的交易员</div>
+                                <div className="space-y-2 max-h-48 overflow-y-auto pr-2">
+                                    {(traders || []).map((trader) => {
+                                        const enabledList = telegramConfig.enabled_trader_ids || []
+                                        const isAllDefault = enabledList.length === 0
+                                        const enabled = isAllDefault || enabledList.includes(trader.trader_id)
+                                        return (
+                                            <label key={trader.trader_id} className="flex items-center gap-2 text-sm text-nofx-text-main">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={enabled}
+                                                    onChange={(e) => {
+                                                        const current = telegramConfig.enabled_trader_ids || []
+                                                        let next = current
+                                                        if (current.length === 0) {
+                                                            if (!e.target.checked) {
+                                                                next = (traders || []).map((t) => t.trader_id).filter((id) => id !== trader.trader_id)
+                                                            }
+                                                        } else {
+                                                            next = e.target.checked
+                                                                ? [...current, trader.trader_id]
+                                                                : current.filter((id) => id !== trader.trader_id)
+                                                        }
+                                                        setTelegramConfig((prev) => ({ ...prev, enabled_trader_ids: next }))
+                                                    }}
+                                                />
+                                                <span>{trader.trader_name}</span>
+                                            </label>
+                                        )
+                                    })}
+                                    {(!traders || traders.length === 0) && (
+                                        <div className="text-xs text-nofx-text-muted">暂无交易员</div>
+                                    )}
+                                </div>
+                                <div className="text-xs text-nofx-text-muted mt-1">不勾选时默认全部交易员发送</div>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                                <button
+                                    type="button"
+                                    onClick={handleSaveTelegramConfig}
+                                    disabled={telegramSaving || telegramLoading}
+                                    className="px-4 py-2 rounded bg-nofx-gold/20 text-nofx-gold border border-nofx-gold/40 text-sm font-semibold hover:bg-nofx-gold/30 transition-colors disabled:opacity-50"
+                                >
+                                    {telegramSaving ? '保存中...' : '保存配置'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleTestTelegram}
+                                    disabled={telegramLoading}
+                                    className="px-4 py-2 rounded bg-white/5 text-nofx-text-main border border-white/10 text-sm font-semibold hover:bg-white/10 transition-colors disabled:opacity-50"
+                                >
+                                    发送测试消息
+                                </button>
+                            </div>
+                            {telegramLoading && (
+                                <div className="text-xs text-nofx-text-muted">加载配置中...</div>
+                            )}
+                        </div>
+
+                        <div className="space-y-4">
+                            <div className="text-sm text-nofx-text-muted">通知内容</div>
+                            <div className="grid grid-cols-1 gap-2">
+                                {notifyTypeOptions.map((item) => {
+                                    const current = telegramConfig.notify_types || {}
+                                    const hasCustom = Object.keys(current).length > 0
+                                    const enabled = hasCustom ? !!current[item.key] : true
+                                    return (
+                                        <label key={item.key} className="flex items-center gap-2 text-sm text-nofx-text-main">
+                                            <input
+                                                type="checkbox"
+                                                checked={enabled}
+                                                onChange={(e) => {
+                                                    let next: Record<string, boolean> = { ...(telegramConfig.notify_types || {}) }
+                                                    if (Object.keys(next).length === 0) {
+                                                        notifyTypeOptions.forEach((opt) => {
+                                                            next[opt.key] = true
+                                                        })
+                                                    }
+                                                    next[item.key] = e.target.checked
+                                                    setTelegramConfig((prev) => ({ ...prev, notify_types: next }))
+                                                }}
+                                            />
+                                            <span>{item.label}</span>
+                                        </label>
+                                    )
+                                })}
+                            </div>
+                            <div className="text-xs text-nofx-text-muted">不勾选时默认全部通知类型发送</div>
+                        </div>
+                    </div>
+                </div>
+
                 {selectedTraderId && (
                     <div
                         className="nofx-glass p-6 animate-slide-in"
-                        style={{ animationDelay: '0.3s' }}
+                        style={{ animationDelay: '0.35s' }}
                     >
                         <div className="flex items-center justify-between mb-6">
                             <h2 className="text-xl font-bold flex items-center gap-2 text-nofx-text-main">
-                                <span className="text-2xl">📲</span>
-                                Telegram 通知
+                                <span className="text-2xl">🎯</span>
+                                净值目标提醒
                             </h2>
                         </div>
 
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div className="space-y-4">
-                                <div className="text-sm text-nofx-text-muted">机器人配置（保存后自动启动）</div>
-                                <div className="flex items-center gap-3">
-                                    <input
-                                        type="checkbox"
-                                        checked={!!telegramConfig.enabled}
-                                        onChange={(e) =>
-                                            setTelegramConfig((prev) => ({ ...prev, enabled: e.target.checked }))
-                                        }
-                                    />
-                                    <span className="text-sm text-nofx-text-main">启用 Telegram 通知</span>
-                                </div>
-                                <div>
-                                    <label className="block text-xs text-nofx-text-muted mb-1">Bot Token</label>
-                                    <input
-                                        type="password"
-                                        placeholder={telegramConfig.bot_token_set ? '已设置，输入可更新' : '请输入 Bot Token'}
-                                        value={telegramBotTokenInput}
-                                        onChange={(e) => setTelegramBotTokenInput(e.target.value)}
-                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs text-nofx-text-muted mb-1">Chat ID</label>
-                                    <input
-                                        type="text"
-                                        placeholder="例如：123456789"
-                                        value={telegramConfig.chat_id || ''}
-                                        onChange={(e) =>
-                                            setTelegramConfig((prev) => ({ ...prev, chat_id: e.target.value }))
-                                        }
-                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-nofx-text-main focus:outline-none focus:border-nofx-gold/50"
-                                    />
-                                </div>
-                                <div className="flex items-center gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={handleSaveTelegramConfig}
-                                        disabled={telegramSaving || telegramLoading}
-                                        className="px-4 py-2 rounded bg-nofx-gold/20 text-nofx-gold border border-nofx-gold/40 text-sm font-semibold hover:bg-nofx-gold/30 transition-colors disabled:opacity-50"
-                                    >
-                                        {telegramSaving ? '保存中...' : '保存配置'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={handleTestTelegram}
-                                        disabled={telegramLoading}
-                                        className="px-4 py-2 rounded bg-white/5 text-nofx-text-main border border-white/10 text-sm font-semibold hover:bg-white/10 transition-colors disabled:opacity-50"
-                                    >
-                                        发送测试消息
-                                    </button>
-                                </div>
-                                {telegramLoading && (
-                                    <div className="text-xs text-nofx-text-muted">加载配置中...</div>
-                                )}
-                            </div>
-
-                            <div className="space-y-4">
-                                <div className="text-sm text-nofx-text-muted">净值目标提醒</div>
                                 <div>
                                     <label className="block text-xs text-nofx-text-muted mb-1">目标净值 (USDT)</label>
                                     <input

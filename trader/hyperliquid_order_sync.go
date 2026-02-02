@@ -139,6 +139,8 @@ func (t *HyperliquidTrader) SyncOrdersFromHyperliquid(traderID string, exchangeI
 				Price:       trade.Price,
 				Quantity:    trade.Quantity,
 				RealizedPnL: trade.RealizedPnL,
+				Fee:         trade.Fee,
+				OrderID:     trade.TradeID,
 				Time:        trade.Time.UTC(),
 			})
 		}

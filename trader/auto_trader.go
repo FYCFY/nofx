@@ -1750,6 +1750,9 @@ func (at *AutoTrader) executePlaceLimitOrderWithRecord(decision *kernel.Decision
 
 	at.recordPendingLimitOrder(result, req, decision.StopLoss, decision.TakeProfit)
 	logger.Infof("  ✓ Limit order placed: %s %s @ %.4f, qty=%.4f", decision.Symbol, side, decision.Price, quantity)
+	if at.userID != "" {
+		notify.NotifyLimitOrderPlaced(at.userID, at.id, decision.Symbol, side, decision.Price, quantity)
+	}
 
 	return nil
 }
@@ -1826,6 +1829,9 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision,
 	actionRecord.Price = decision.Price
 	actionRecord.StopLoss = decision.Price
 	actionRecord.Quantity = qty
+	if at.userID != "" {
+		notify.NotifyUpdateStopLoss(at.userID, at.id, decision.Symbol, decision.Price, qty)
+	}
 	return nil
 }
 
@@ -1843,6 +1849,9 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *kernel.Decisio
 	actionRecord.Price = decision.Price
 	actionRecord.TakeProfit = decision.Price
 	actionRecord.Quantity = qty
+	if at.userID != "" {
+		notify.NotifyUpdateTakeProfit(at.userID, at.id, decision.Symbol, decision.Price, qty)
+	}
 	return nil
 }
 
@@ -1905,18 +1914,6 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *kernel.Decision, acti
 
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_long", quantity, marketData.CurrentPrice, 0, entryPrice)
-
-	if at.userID != "" {
-		notify.NotifyCloseTrade(at.userID, at.id, notify.TradeInfo{
-			Symbol:      decision.Symbol,
-			OrderAction: "close_long",
-			Side:        "SELL",
-			Price:       marketData.CurrentPrice,
-			Quantity:    quantity,
-			RealizedPnL: 0,
-			Time:        time.Now().UTC(),
-		})
-	}
 
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
@@ -1981,18 +1978,6 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *kernel.Decision, act
 
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_short", quantity, marketData.CurrentPrice, 0, entryPrice)
-
-	if at.userID != "" {
-		notify.NotifyCloseTrade(at.userID, at.id, notify.TradeInfo{
-			Symbol:      decision.Symbol,
-			OrderAction: "close_short",
-			Side:        "BUY",
-			Price:       marketData.CurrentPrice,
-			Quantity:    quantity,
-			RealizedPnL: 0,
-			Time:        time.Now().UTC(),
-		})
-	}
 
 	logger.Infof("  ✓ Position closed successfully")
 	return nil

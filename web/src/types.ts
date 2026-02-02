@@ -204,6 +204,8 @@ export interface TelegramConfig {
   bot_token_set?: boolean
   chat_id?: string
   default_trader_id?: string
+  enabled_trader_ids?: string[]
+  notify_types?: Record<string, boolean>
 }
 
 export interface TelegramConfigUpdateRequest {
@@ -211,6 +213,8 @@ export interface TelegramConfigUpdateRequest {
   bot_token?: string
   chat_id?: string
   default_trader_id?: string
+  enabled_trader_ids?: string[]
+  notify_types?: Record<string, boolean>
 }
 
 export interface TraderNotifyRule {

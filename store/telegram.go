@@ -16,6 +16,8 @@ type TelegramSetting struct {
 	ChatID          string                 `gorm:"column:chat_id;default:''" json:"chat_id"`
 	Enabled         bool                   `gorm:"column:enabled;default:false" json:"enabled"`
 	DefaultTraderID string                 `gorm:"column:default_trader_id;default:''" json:"default_trader_id"`
+	EnabledTraderIDs string                `gorm:"column:enabled_trader_ids;default:''" json:"enabled_trader_ids"`
+	NotifyTypes     string                 `gorm:"column:notify_types;default:''" json:"notify_types"`
 	CreatedAt       time.Time              `json:"created_at"`
 	UpdatedAt       time.Time              `json:"updated_at"`
 }

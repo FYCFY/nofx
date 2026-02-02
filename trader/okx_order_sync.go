@@ -275,6 +275,8 @@ func (t *OKXTrader) SyncOrdersFromOKX(traderID string, exchangeID string, exchan
 				Price:       trade.FillPrice,
 				Quantity:    trade.FillQtyBase,
 				RealizedPnL: 0,
+				Fee:         trade.Fee,
+				OrderID:     trade.TradeID,
 				Time:        trade.ExecTime.UTC(),
 			})
 		}
