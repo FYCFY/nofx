@@ -26,6 +26,7 @@ type Trader struct {
 	ExchangeID          string    `gorm:"column:exchange_id;not null" json:"exchange_id"`
 	StrategyID          string    `gorm:"column:strategy_id;default:''" json:"strategy_id"`
 	InitialBalance      float64   `gorm:"column:initial_balance;not null" json:"initial_balance"`
+	TargetFuturesEquity float64   `gorm:"column:target_futures_equity;default:0" json:"target_futures_equity"`
 	ScanIntervalMinutes int       `gorm:"column:scan_interval_minutes;default:3" json:"scan_interval_minutes"`
 	IsRunning           bool      `gorm:"column:is_running;default:false" json:"is_running"`
 	IsCrossMargin       bool      `gorm:"column:is_cross_margin;default:true" json:"is_cross_margin"`
@@ -63,12 +64,24 @@ func (s *TraderStore) initTables() error {
 		var tableExists int64
 		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'traders'`).Scan(&tableExists)
 		if tableExists > 0 {
-			return nil
+			return s.migrateColumns()
 		}
 	}
 	// Use GORM AutoMigrate
 	if err := s.db.AutoMigrate(&Trader{}); err != nil {
 		return fmt.Errorf("failed to migrate traders table: %w", err)
+	}
+	return nil
+}
+
+func (s *TraderStore) migrateColumns() error {
+	stmts := []string{
+		`ALTER TABLE traders ADD COLUMN IF NOT EXISTS target_futures_equity DOUBLE PRECISION DEFAULT 0`,
+	}
+	for _, stmt := range stmts {
+		if err := s.db.Exec(stmt).Error; err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -116,6 +129,7 @@ func (s *TraderStore) Update(trader *Trader) error {
 		"strategy_id":         trader.StrategyID,
 		"is_cross_margin":     trader.IsCrossMargin,
 		"show_in_competition": trader.ShowInCompetition,
+		"target_futures_equity": trader.TargetFuturesEquity,
 	}
 
 	// Only update these if > 0

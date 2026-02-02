@@ -82,6 +82,7 @@ type AutoTraderConfig struct {
 
 	// Account configuration
 	InitialBalance float64 // Initial balance (for P&L calculation, must be set manually)
+	TargetFuturesEquity float64 // Target futures equity (USDT) for daily rebalance
 
 	// Risk control (only as hints, AI can make autonomous decisions)
 	MaxDailyLoss    float64       // Maximum daily loss percentage (hint)
@@ -150,6 +151,8 @@ type AutoTrader struct {
 	pendingLimitOrdersMu  sync.RWMutex
 	pendingLimitSyncing   atomic.Bool
 }
+
+var futuresBalanceGuardStarted sync.Map
 
 // NewAutoTrader creates an automatic trader
 // st parameter is used to store decision records to database
@@ -406,6 +409,7 @@ func (at *AutoTrader) Run() error {
 	// Start drawdown monitoring
 	at.startDrawdownMonitor()
 	at.startPendingLimitOrderMonitor(5 * time.Second)
+	at.startFuturesBalanceGuard()
 
 	// Start Lighter order sync if using Lighter exchange
 	if at.exchange == "lighter" {
@@ -2356,6 +2360,111 @@ func (at *AutoTrader) startDrawdownMonitor() {
 	}()
 }
 
+func (at *AutoTrader) startFuturesBalanceGuard() {
+	if at.config.Exchange != "binance" || at.config.TargetFuturesEquity <= 0 {
+		return
+	}
+
+	if _, loaded := futuresBalanceGuardStarted.LoadOrStore(at.config.ExchangeID, struct{}{}); loaded {
+		return
+	}
+
+	at.monitorWg.Add(1)
+	go func() {
+		defer at.monitorWg.Done()
+		defer futuresBalanceGuardStarted.Delete(at.config.ExchangeID)
+
+		location, err := time.LoadLocation("Asia/Shanghai")
+		if err != nil {
+			logger.Infof("⚠️ [%s] Failed to load Beijing time zone: %v", at.name, err)
+			location = time.FixedZone("CST", 8*3600)
+		}
+
+		logger.Infof("🏦 [%s] Futures balance guard enabled (target %.2f USDT, daily 00:00 Beijing)",
+			at.name, at.config.TargetFuturesEquity)
+
+		for {
+			next := nextBeijingMidnight(time.Now(), location)
+			wait := time.Until(next)
+			timer := time.NewTimer(wait)
+
+			select {
+			case <-timer.C:
+				at.rebalanceFuturesBalance()
+			case <-at.stopMonitorCh:
+				timer.Stop()
+				logger.Infof("[%s] ⏹ Futures balance guard stopped", at.name)
+				return
+			}
+		}
+	}()
+}
+
+func nextBeijingMidnight(now time.Time, location *time.Location) time.Time {
+	local := now.In(location)
+	year, month, day := local.Date()
+	next := time.Date(year, month, day, 0, 0, 0, 0, location).Add(24 * time.Hour)
+	return next
+}
+
+func (at *AutoTrader) rebalanceFuturesBalance() {
+	bt, ok := at.trader.(*FuturesTrader)
+	if !ok {
+		logger.Infof("⚠️ [%s] Futures balance guard only supports Binance futures", at.name)
+		return
+	}
+
+	target := at.config.TargetFuturesEquity
+	if target <= 0 {
+		return
+	}
+
+	equity, available, err := bt.GetFuturesEquityUSDT()
+	if err != nil {
+		logger.Infof("⚠️ [%s] Failed to get futures equity: %v", at.name, err)
+		return
+	}
+
+	diff := target - equity
+	if math.Abs(diff) < 0.01 {
+		logger.Infof("🏦 [%s] Futures equity already near target: %.2f USDT (target %.2f)", at.name, equity, target)
+		return
+	}
+
+	if diff > 0 {
+		spotAvailable, err := bt.GetSpotUSDTBalance()
+		if err != nil {
+			logger.Infof("⚠️ [%s] Failed to get spot balance: %v", at.name, err)
+			return
+		}
+
+		transferAmount := math.Min(diff, spotAvailable)
+		if transferAmount <= 0 {
+			logger.Infof("⚠️ [%s] Spot balance insufficient: need %.2f, available %.2f", at.name, diff, spotAvailable)
+			return
+		}
+		if err := bt.TransferUSDTSpotToFutures(transferAmount); err != nil {
+			logger.Infof("❌ [%s] Spot→Futures transfer failed: %v", at.name, err)
+			return
+		}
+		logger.Infof("✅ [%s] Spot→Futures transfer success: %.2f USDT (equity %.2f → target %.2f)",
+			at.name, transferAmount, equity, target)
+		return
+	}
+
+	excess := -diff
+	transferAmount := math.Min(excess, available)
+	if transferAmount <= 0 {
+		logger.Infof("⚠️ [%s] Futures available balance insufficient: need %.2f, available %.2f", at.name, excess, available)
+		return
+	}
+	if err := bt.TransferUSDTFuturesToSpot(transferAmount); err != nil {
+		logger.Infof("❌ [%s] Futures→Spot transfer failed: %v", at.name, err)
+		return
+	}
+	logger.Infof("✅ [%s] Futures→Spot transfer success: %.2f USDT (equity %.2f → target %.2f)",
+		at.name, transferAmount, equity, target)
+}
 func (at *AutoTrader) getTakeProfitMapForPositions(positions []map[string]interface{}) map[string]float64 {
 	if len(positions) == 0 {
 		return nil

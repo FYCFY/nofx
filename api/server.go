@@ -415,6 +415,7 @@ type CreateTraderRequest struct {
 	ExchangeID          string  `json:"exchange_id" binding:"required"`
 	StrategyID          string  `json:"strategy_id"` // Strategy ID (new version)
 	InitialBalance      float64 `json:"initial_balance"`
+	TargetFuturesEquity *float64 `json:"target_futures_equity"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
 	IsCrossMargin       *bool   `json:"is_cross_margin"`     // Pointer type, nil means use default value true
 	ShowInCompetition   *bool   `json:"show_in_competition"` // Pointer type, nil means use default value true
@@ -576,6 +577,12 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		scanIntervalMinutes = 3 // Default 3 minutes, not allowed to be less than 3
 	}
 
+	// Set target futures equity (USDT)
+	targetFuturesEquity := 0.0
+	if req.TargetFuturesEquity != nil && *req.TargetFuturesEquity > 0 {
+		targetFuturesEquity = *req.TargetFuturesEquity
+	}
+
 	// Query exchange actual balance, override user input
 	actualBalance := req.InitialBalance // Default to use user input
 	exchanges, err := s.store.Exchange().List(userID)
@@ -687,6 +694,7 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		ExchangeID:           req.ExchangeID,
 		StrategyID:           req.StrategyID, // Associated strategy ID (new version)
 		InitialBalance:       actualBalance,  // Use actual queried balance
+		TargetFuturesEquity:  targetFuturesEquity,
 		BTCETHLeverage:       btcEthLeverage,
 		AltcoinLeverage:      altcoinLeverage,
 		TradingSymbols:       req.TradingSymbols,
@@ -737,6 +745,7 @@ type UpdateTraderRequest struct {
 	ExchangeID          string  `json:"exchange_id" binding:"required"`
 	StrategyID          string  `json:"strategy_id"` // Strategy ID (new version)
 	InitialBalance      float64 `json:"initial_balance"`
+	TargetFuturesEquity *float64 `json:"target_futures_equity"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
 	IsCrossMargin       *bool   `json:"is_cross_margin"`
 	ShowInCompetition   *bool   `json:"show_in_competition"`
@@ -823,6 +832,12 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		strategyID = existingTrader.StrategyID
 	}
 
+	// Set target futures equity (USDT)
+	targetFuturesEquity := existingTrader.TargetFuturesEquity
+	if req.TargetFuturesEquity != nil {
+		targetFuturesEquity = *req.TargetFuturesEquity
+	}
+
 	// Update trader configuration
 	traderRecord := &store.Trader{
 		ID:                   traderID,
@@ -832,6 +847,7 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		ExchangeID:           req.ExchangeID,
 		StrategyID:           strategyID, // Associated strategy ID
 		InitialBalance:       req.InitialBalance,
+		TargetFuturesEquity:  targetFuturesEquity,
 		BTCETHLeverage:       btcEthLeverage,
 		AltcoinLeverage:      altcoinLeverage,
 		TradingSymbols:       req.TradingSymbols,
@@ -2100,6 +2116,7 @@ func (s *Server) handleTraderList(c *gin.Context) {
 			"is_running":          isRunning,
 			"show_in_competition": trader.ShowInCompetition,
 			"initial_balance":     trader.InitialBalance,
+			"target_futures_equity": trader.TargetFuturesEquity,
 			"strategy_id":         trader.StrategyID,
 			"strategy_name":       strategyName,
 		})
@@ -2144,6 +2161,7 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 		"exchange_id":           traderConfig.ExchangeID,
 		"strategy_id":           traderConfig.StrategyID,
 		"initial_balance":       traderConfig.InitialBalance,
+		"target_futures_equity": traderConfig.TargetFuturesEquity,
 		"scan_interval_minutes": traderConfig.ScanIntervalMinutes,
 		"btc_eth_leverage":      traderConfig.BTCETHLeverage,
 		"altcoin_leverage":      traderConfig.AltcoinLeverage,

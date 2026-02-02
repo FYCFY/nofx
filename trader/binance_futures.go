@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	binance "github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/futures"
 )
 
@@ -46,6 +47,7 @@ func getBrOrderID() string {
 // FuturesTrader Binance futures trader
 type FuturesTrader struct {
 	client *futures.Client
+	spotClient *binance.Client
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -69,6 +71,7 @@ type FuturesTrader struct {
 // NewFuturesTrader creates futures trader
 func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
 	client := futures.NewClient(apiKey, secretKey)
+	spotClient := binance.NewClient(apiKey, secretKey)
 
 	hookRes := hook.HookExec[hook.NewBinanceTraderResult](hook.NEW_BINANCE_TRADER, userId, client)
 	if hookRes != nil && hookRes.GetResult() != nil {
@@ -77,8 +80,10 @@ func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
 
 	// Sync time to avoid "Timestamp ahead" error
 	syncBinanceServerTime(client)
+	syncBinanceServerTimeSpot(spotClient)
 	trader := &FuturesTrader{
 		client:        client,
+		spotClient:    spotClient,
 		cacheDuration: 15 * time.Second, // 15-second cache
 	}
 
@@ -130,6 +135,19 @@ func syncBinanceServerTime(client *futures.Client) {
 	logger.Infof("⏱ Binance server time synced, offset %dms", offset)
 }
 
+func syncBinanceServerTimeSpot(client *binance.Client) {
+	serverTime, err := client.NewServerTimeService().Do(context.Background())
+	if err != nil {
+		logger.Infof("⚠️ Failed to sync Binance spot server time: %v", err)
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	offset := now - serverTime
+	client.TimeOffset = offset
+	logger.Infof("⏱ Binance spot server time synced, offset %dms", offset)
+}
+
 // GetBalance gets account balance (with cache)
 func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	// First check if cache is valid
@@ -177,6 +195,69 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	t.balanceCacheMutex.Unlock()
 
 	return result, nil
+}
+
+// GetFuturesEquityUSDT returns futures equity (wallet + unrealized) and available balance.
+func (t *FuturesTrader) GetFuturesEquityUSDT() (float64, float64, error) {
+	balance, err := t.GetBalance()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	totalWalletBalance, _ := balance["totalWalletBalance"].(float64)
+	totalUnrealizedProfit, _ := balance["totalUnrealizedProfit"].(float64)
+	availableBalance, _ := balance["availableBalance"].(float64)
+
+	equity := totalWalletBalance + totalUnrealizedProfit
+	return equity, availableBalance, nil
+}
+
+// GetSpotUSDTBalance returns available USDT balance in spot account.
+func (t *FuturesTrader) GetSpotUSDTBalance() (float64, error) {
+	account, err := t.spotClient.NewGetAccountService().Do(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to get spot account info: %w", err)
+	}
+
+	for _, bal := range account.Balances {
+		if strings.EqualFold(bal.Asset, "USDT") {
+			free, _ := strconv.ParseFloat(bal.Free, 64)
+			return free, nil
+		}
+	}
+	return 0, nil
+}
+
+// TransferUSDTSpotToFutures transfers USDT from spot to UM futures.
+func (t *FuturesTrader) TransferUSDTSpotToFutures(amount float64) error {
+	return t.transferUSDT(binance.FuturesTransferTypeToFutures, amount)
+}
+
+// TransferUSDTFuturesToSpot transfers USDT from UM futures to spot.
+func (t *FuturesTrader) TransferUSDTFuturesToSpot(amount float64) error {
+	return t.transferUSDT(binance.FuturesTransferTypeToMain, amount)
+}
+
+func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, amount float64) error {
+	if amount <= 0 {
+		return fmt.Errorf("invalid transfer amount: %.8f", amount)
+	}
+
+	amt := strconv.FormatFloat(amount, 'f', -1, 64)
+	_, err := t.spotClient.NewFuturesTransferService().
+		Asset("USDT").
+		Amount(amt).
+		Type(transferType).
+		Do(context.Background())
+	if err != nil {
+		return err
+	}
+
+	t.balanceCacheMutex.Lock()
+	t.cachedBalance = nil
+	t.balanceCacheTime = time.Time{}
+	t.balanceCacheMutex.Unlock()
+	return nil
 }
 
 // GetPositions gets all positions (with cache)

@@ -35,6 +35,7 @@ interface FormState {
   show_in_competition: boolean
   scan_interval_minutes: number
   initial_balance?: number
+  target_futures_equity?: number
 }
 
 interface TraderConfigModalProps {
@@ -172,6 +173,9 @@ export function TraderConfigModal({
       // 只在编辑模式时包含initial_balance
       if (isEditMode && formData.initial_balance !== undefined) {
         saveData.initial_balance = formData.initial_balance
+      }
+      if (formData.target_futures_equity !== undefined) {
+        saveData.target_futures_equity = formData.target_futures_equity
       }
 
       await toast.promise(onSave(saveData), {
@@ -474,6 +478,28 @@ export function TraderConfigModal({
                 </div>
                 <p className="text-xs text-[#848E9C] mt-1">
                   隐藏后将不在竞技场页面显示此交易员
+                </p>
+              </div>
+
+              <div>
+                <label className="text-sm text-[#EAECEF] block mb-2">
+                  合约目标权益 (USDT)
+                </label>
+                <input
+                  type="number"
+                  value={formData.target_futures_equity || 0}
+                  onChange={(e) =>
+                    handleInputChange(
+                      'target_futures_equity',
+                      Number(e.target.value)
+                    )
+                  }
+                  className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] focus:border-[#F0B90B] focus:outline-none"
+                  min="0"
+                  step="0.01"
+                />
+                <p className="text-xs text-[#848E9C] mt-1">
+                  仅币安有效：每天北京时间 00:00 自动划转，保持合约账户总权益
                 </p>
               </div>
 

@@ -183,6 +183,7 @@ export interface CreateTraderRequest {
   exchange_id: string
   strategy_id?: string // 策略ID（新版，使用保存的策略配置）
   initial_balance?: number // 可选：创建时由后端自动获取，编辑时可手动更新
+  target_futures_equity?: number // 合约目标权益（USDT）
   scan_interval_minutes?: number
   is_cross_margin?: boolean
   show_in_competition?: boolean // 是否在竞技场显示
@@ -284,6 +285,7 @@ export interface TraderConfigData {
   show_in_competition: boolean  // 是否在竞技场显示
   scan_interval_minutes: number
   initial_balance: number
+  target_futures_equity?: number
   is_running: boolean
   // 以下为旧版字段（向后兼容）
   btc_eth_leverage?: number
