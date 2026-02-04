@@ -21,11 +21,27 @@ type PositionSnapshot struct {
 	Side             string  `json:"side"`
 	Quantity         float64 `json:"quantity"`
 	AvgPrice         float64 `json:"avg_price"`
+	StopLoss         float64 `json:"stop_loss,omitempty"`
+	TakeProfit       float64 `json:"take_profit,omitempty"`
 	Leverage         int     `json:"leverage"`
 	LiquidationPrice float64 `json:"liquidation_price"`
 	MarginUsed       float64 `json:"margin_used"`
 	OpenTime         int64   `json:"open_time"`
 	AccumulatedFee   float64 `json:"accumulated_fee,omitempty"` // Opening fees accumulated
+}
+
+// PendingLimitOrder represents a limit order waiting to be filled in backtest.
+type PendingLimitOrder struct {
+	OrderID    string  `json:"order_id"`
+	ClientID   string  `json:"client_id,omitempty"`
+	Symbol     string  `json:"symbol"`
+	Side       string  `json:"side"` // "long" for buy, "short" for sell
+	Price      float64 `json:"price"`
+	Quantity   float64 `json:"quantity"`
+	Leverage   int     `json:"leverage"`
+	StopLoss   float64 `json:"stop_loss,omitempty"`
+	TakeProfit float64 `json:"take_profit,omitempty"`
+	CreatedAt  int64   `json:"created_at"`
 }
 
 // BacktestState represents the real-time state during execution (in-memory state).
@@ -42,6 +58,7 @@ type BacktestState struct {
 	MinEquity       float64
 	MaxDrawdownPct  float64
 	Positions       map[string]PositionSnapshot
+	PendingOrders   []PendingLimitOrder
 	LastUpdate      time.Time
 	Liquidated      bool
 	LiquidationNote string
@@ -115,6 +132,7 @@ type Checkpoint struct {
 	UnrealizedPnL   float64                   `json:"unrealized_pnl"`
 	RealizedPnL     float64                   `json:"realized_pnl"`
 	Positions       []PositionSnapshot        `json:"positions"`
+	PendingOrders   []PendingLimitOrder       `json:"pending_orders,omitempty"`
 	DecisionCycle   int                       `json:"decision_cycle"`
 	IndicatorsState map[string]map[string]any `json:"indicators_state,omitempty"`
 	RNGSeed         int64                     `json:"rng_seed,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"nofx/logger"
 	"os"
 	"path/filepath"
@@ -63,6 +64,8 @@ type Runner struct {
 	lockInfo     *RunLockInfo
 	lockStop     chan struct{}
 	lockStopOnce sync.Once // Ensures lockStop is closed only once
+
+	pendingOrders []PendingLimitOrder
 }
 
 // NewRunner constructs a backtest runner.
@@ -91,6 +94,7 @@ func NewRunner(cfg BacktestConfig, mcpClient mcp.AIClient) (*Runner, error) {
 	createdAt := time.Now().UTC()
 	state := &BacktestState{
 		Positions:      make(map[string]PositionSnapshot),
+		PendingOrders:  make([]PendingLimitOrder, 0),
 		Cash:           account.Cash(),
 		Equity:         cfg.InitialBalance,
 		UnrealizedPnL:  0,
@@ -137,6 +141,7 @@ func NewRunner(cfg BacktestConfig, mcpClient mcp.AIClient) (*Runner, error) {
 		createdAt:      createdAt,
 		aiCache:        aiCache,
 		cachePath:      cachePath,
+		pendingOrders:  make([]PendingLimitOrder, 0),
 	}
 
 	if err := r.initLock(); err != nil {
@@ -284,18 +289,30 @@ func (r *Runner) stepOnce() error {
 		priceMap[symbol] = data.CurrentPrice
 	}
 
+	// Pre-decision: process pending limit orders and stop-loss/take-profit
+	preEvents, preLog, err := r.processPendingAndStops(ts, marketData, state.DecisionCycle+1)
+	if err != nil {
+		return err
+	}
+
 	callCount := state.DecisionCycle + 1
 	shouldDecide := r.shouldTriggerDecision(state.BarIndex)
 
 	var (
 		record          *store.DecisionRecord
 		decisionActions []store.DecisionAction
-		tradeEvents     = make([]TradeEvent, 0)
+		tradeEvents     = make([]TradeEvent, 0, len(preEvents))
 		execLog         []string
 		hadError        bool
 	)
 
 	decisionAttempted := shouldDecide
+	if len(preEvents) > 0 {
+		tradeEvents = append(tradeEvents, preEvents...)
+	}
+	if preLog != "" {
+		execLog = append(execLog, preLog)
+	}
 
 	if shouldDecide {
 		ctx, rec, err := r.buildDecisionContext(ts, marketData, multiTF, priceMap, callCount)
@@ -383,6 +400,23 @@ func (r *Runner) stepOnce() error {
 				}
 				decisionActions = append(decisionActions, actionRecord)
 			}
+		}
+	}
+
+	// Post-decision: allow same-bar fills and SL/TP for newly placed orders
+	postEvents, postLog, err := r.processPendingAndStops(ts, marketData, callCount)
+	if err != nil {
+		if record != nil {
+			record.Success = false
+			record.ErrorMessage = err.Error()
+			_ = r.logDecision(record)
+		}
+		return err
+	}
+	if len(postEvents) > 0 {
+		tradeEvents = append(tradeEvents, postEvents...)
+		if record != nil && postLog != "" {
+			execLog = append(execLog, postLog)
 		}
 	}
 
@@ -514,6 +548,7 @@ func (r *Runner) buildDecisionContext(ts int64, marketData map[string]*market.Da
 		CallCount:       callCount,
 		Account:         accountInfo,
 		Positions:       positions,
+		OpenOrders:      r.toPendingOrdersForContext(ts),
 		CandidateCoins:  candidateCoins,
 		PromptVariant:   r.cfg.PromptVariant,
 		MarketDataMap:   marketData,
@@ -634,6 +669,8 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		Leverage:  usedLeverage,
 		Timestamp: time.UnixMilli(ts).UTC(),
 	}
+	actionRecord.StopLoss = dec.StopLoss
+	actionRecord.TakeProfit = dec.TakeProfit
 
 	if priceMap == nil {
 		return actionRecord, nil, "", fmt.Errorf("priceMap is nil")
@@ -646,6 +683,31 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 	fillPrice := r.executionPrice(symbol, basePrice, ts)
 
 	switch dec.Action {
+	case "place_buy_limit", "place_sell_limit":
+		order, err := r.placeLimitOrder(dec, ts, basePrice)
+		if err != nil {
+			return actionRecord, nil, "", err
+		}
+		actionRecord.Price = order.Price
+		actionRecord.Quantity = order.Quantity
+		actionRecord.Leverage = order.Leverage
+		logEntry := fmt.Sprintf("placed limit order %s %s qty=%.6f price=%.4f",
+			order.OrderID, order.Symbol, order.Quantity, order.Price)
+		return actionRecord, nil, logEntry, nil
+
+	case "cancel_order":
+		removed := r.cancelLimitOrder(dec)
+		if removed == 0 {
+			return actionRecord, nil, "", fmt.Errorf("order not found for cancel")
+		}
+		logEntry := fmt.Sprintf("cancelled %d limit order(s)", removed)
+		return actionRecord, nil, logEntry, nil
+
+	case "cancel_all_orders":
+		removed := r.cancelAllLimitOrders(dec.Symbol)
+		logEntry := fmt.Sprintf("cancelled %d limit order(s)", removed)
+		return actionRecord, nil, logEntry, nil
+
 	case "open_long":
 		qty := r.determineQuantity(dec, basePrice)
 		if qty <= 0 {
@@ -658,6 +720,7 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		actionRecord.Quantity = qty
 		actionRecord.Price = execPrice
 		actionRecord.Leverage = pos.Leverage
+		_ = r.account.UpdateStopLossTakeProfit(symbol, "long", dec.StopLoss, dec.TakeProfit)
 		trade := TradeEvent{
 			Timestamp:     ts,
 			Symbol:        symbol,
@@ -687,6 +750,7 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		actionRecord.Quantity = qty
 		actionRecord.Price = execPrice
 		actionRecord.Leverage = pos.Leverage
+		_ = r.account.UpdateStopLossTakeProfit(symbol, "short", dec.StopLoss, dec.TakeProfit)
 		trade := TradeEvent{
 			Timestamp:     ts,
 			Symbol:        symbol,
@@ -717,6 +781,7 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		actionRecord.Quantity = qty
 		actionRecord.Price = execPrice
 		actionRecord.Leverage = posLev
+		_ = r.account.UpdateStopLossTakeProfit(symbol, "long", dec.StopLoss, dec.TakeProfit)
 		trade := TradeEvent{
 			Timestamp:     ts,
 			Symbol:        symbol,
@@ -747,6 +812,7 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		actionRecord.Quantity = qty
 		actionRecord.Price = execPrice
 		actionRecord.Leverage = posLev
+		_ = r.account.UpdateStopLossTakeProfit(symbol, "short", dec.StopLoss, dec.TakeProfit)
 		trade := TradeEvent{
 			Timestamp:     ts,
 			Symbol:        symbol,
@@ -765,10 +831,304 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		return actionRecord, []TradeEvent{trade}, "", nil
 
 	case "hold", "wait":
+		if dec.StopLoss > 0 || dec.TakeProfit > 0 {
+			side := dec.PositionSide
+			if side == "" {
+				return actionRecord, nil, "", fmt.Errorf("position_side required to update stop/take")
+			}
+			if err := r.account.UpdateStopLossTakeProfit(symbol, strings.ToLower(side), dec.StopLoss, dec.TakeProfit); err != nil {
+				return actionRecord, nil, "", err
+			}
+			logEntry := fmt.Sprintf("updated %s SL/TP", symbol)
+			return actionRecord, nil, logEntry, nil
+		}
 		return actionRecord, nil, fmt.Sprintf("hold position: %s", dec.Action), nil
 	default:
 		return actionRecord, nil, "", fmt.Errorf("unsupported action %s", dec.Action)
 	}
+}
+
+func (r *Runner) placeLimitOrder(dec kernel.Decision, ts int64, basePrice float64) (PendingLimitOrder, error) {
+	if dec.Price <= 0 {
+		return PendingLimitOrder{}, fmt.Errorf("limit price required")
+	}
+	qty := dec.Quantity
+	if qty <= 0 {
+		qty = r.determineQuantity(dec, basePrice)
+	}
+	if qty <= 0 {
+		return PendingLimitOrder{}, fmt.Errorf("invalid quantity")
+	}
+	orderID := dec.OrderID.String()
+	if orderID == "" {
+		if dec.ClientID != "" {
+			orderID = dec.ClientID
+		} else {
+			orderID = fmt.Sprintf("bt-%d", time.Now().UnixNano())
+		}
+	}
+	side := "long"
+	if dec.Action == "place_sell_limit" {
+		side = "short"
+	}
+	lev := r.resolveLeverage(dec.Leverage, dec.Symbol)
+	order := PendingLimitOrder{
+		OrderID:    orderID,
+		ClientID:   dec.ClientID,
+		Symbol:     dec.Symbol,
+		Side:       side,
+		Price:      dec.Price,
+		Quantity:   qty,
+		Leverage:   lev,
+		StopLoss:   dec.StopLoss,
+		TakeProfit: dec.TakeProfit,
+		CreatedAt:  ts,
+	}
+	r.pendingOrders = append(r.pendingOrders, order)
+	return order, nil
+}
+
+func (r *Runner) cancelLimitOrder(dec kernel.Decision) int {
+	targetID := dec.OrderID.String()
+	if targetID == "" {
+		targetID = dec.ClientID
+	}
+	if targetID == "" {
+		return 0
+	}
+	removed := 0
+	keep := make([]PendingLimitOrder, 0, len(r.pendingOrders))
+	for _, ord := range r.pendingOrders {
+		if ord.OrderID == targetID || (ord.ClientID != "" && ord.ClientID == targetID) {
+			removed++
+			continue
+		}
+		keep = append(keep, ord)
+	}
+	r.pendingOrders = keep
+	return removed
+}
+
+func (r *Runner) cancelAllLimitOrders(symbol string) int {
+	if len(r.pendingOrders) == 0 {
+		return 0
+	}
+	removed := 0
+	keep := make([]PendingLimitOrder, 0, len(r.pendingOrders))
+	for _, ord := range r.pendingOrders {
+		if symbol == "" || strings.EqualFold(ord.Symbol, symbol) {
+			removed++
+			continue
+		}
+		keep = append(keep, ord)
+	}
+	r.pendingOrders = keep
+	return removed
+}
+
+func (r *Runner) snapshotPendingOrders() []PendingLimitOrder {
+	if len(r.pendingOrders) == 0 {
+		return nil
+	}
+	out := make([]PendingLimitOrder, len(r.pendingOrders))
+	copy(out, r.pendingOrders)
+	return out
+}
+
+func (r *Runner) toPendingOrdersForContext(ts int64) []kernel.PendingOrder {
+	if len(r.pendingOrders) == 0 {
+		return nil
+	}
+	res := make([]kernel.PendingOrder, 0, len(r.pendingOrders))
+	for _, ord := range r.pendingOrders {
+		age := int64(0)
+		if ord.CreatedAt > 0 && ts >= ord.CreatedAt {
+			age = (ts - ord.CreatedAt) / 1000
+		}
+		res = append(res, kernel.PendingOrder{
+			OrderID:    ord.OrderID,
+			ClientID:   ord.ClientID,
+			Symbol:     ord.Symbol,
+			Side:       ord.Side,
+			Type:       "LIMIT",
+			Price:      ord.Price,
+			Quantity:   ord.Quantity,
+			StopLoss:   ord.StopLoss,
+			TakeProfit: ord.TakeProfit,
+			AgeSeconds: age,
+		})
+	}
+	return res
+}
+
+func (r *Runner) processPendingAndStops(ts int64, marketData map[string]*market.Data, cycle int) ([]TradeEvent, string, error) {
+	events := make([]TradeEvent, 0)
+	var logBuilder strings.Builder
+
+	filled, logEntry, err := r.processPendingLimitOrders(ts, cycle)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(filled) > 0 {
+		events = append(events, filled...)
+		if logEntry != "" {
+			logBuilder.WriteString(logEntry)
+		}
+	}
+
+	stops, stopLog, err := r.processStopTake(ts, cycle)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(stops) > 0 {
+		events = append(events, stops...)
+		if logBuilder.Len() > 0 && stopLog != "" {
+			logBuilder.WriteString(" | ")
+		}
+		if stopLog != "" {
+			logBuilder.WriteString(stopLog)
+		}
+	}
+
+	return events, logBuilder.String(), nil
+}
+
+func (r *Runner) processPendingLimitOrders(ts int64, cycle int) ([]TradeEvent, string, error) {
+	if len(r.pendingOrders) == 0 {
+		return nil, "", nil
+	}
+	remaining := make([]PendingLimitOrder, 0, len(r.pendingOrders))
+	events := make([]TradeEvent, 0)
+	for _, ord := range r.pendingOrders {
+		curr, _ := r.feed.decisionBarSnapshot(ord.Symbol, ts)
+		if curr == nil || curr.Close <= 0 {
+			remaining = append(remaining, ord)
+			continue
+		}
+		if !limitTouched(ord, curr.High, curr.Low) {
+			remaining = append(remaining, ord)
+			continue
+		}
+		pos, fee, execPrice, err := r.account.Open(ord.Symbol, ord.Side, ord.Quantity, ord.Leverage, ord.Price, ts)
+		if err != nil {
+			return nil, "", err
+		}
+		_ = r.account.UpdateStopLossTakeProfit(ord.Symbol, ord.Side, ord.StopLoss, ord.TakeProfit)
+		basePrice := curr.Close
+		events = append(events, TradeEvent{
+			Timestamp:     ts,
+			Symbol:        ord.Symbol,
+			Action:        "limit_fill",
+			Side:          ord.Side,
+			Quantity:      ord.Quantity,
+			Price:         execPrice,
+			Fee:           fee,
+			Slippage:      execPrice - basePrice,
+			OrderValue:    execPrice * ord.Quantity,
+			RealizedPnL:   0,
+			Leverage:      pos.Leverage,
+			Cycle:         cycle,
+			PositionAfter: pos.Quantity,
+		})
+	}
+	r.pendingOrders = remaining
+	if len(events) == 0 {
+		return nil, "", nil
+	}
+	return events, fmt.Sprintf("filled %d limit order(s)", len(events)), nil
+}
+
+func (r *Runner) processStopTake(ts int64, cycle int) ([]TradeEvent, string, error) {
+	positions := r.account.Positions()
+	if len(positions) == 0 {
+		return nil, "", nil
+	}
+	events := make([]TradeEvent, 0)
+	for _, pos := range positions {
+		curr, _ := r.feed.decisionBarSnapshot(pos.Symbol, ts)
+		if curr == nil || curr.Close <= 0 {
+			continue
+		}
+		trigger, triggerPrice := pickStopTakeTrigger(pos, curr.Open, curr.High, curr.Low)
+		if trigger == "" {
+			continue
+		}
+		realized, fee, execPrice, err := r.account.Close(pos.Symbol, pos.Side, pos.Quantity, triggerPrice)
+		if err != nil {
+			return nil, "", err
+		}
+		basePrice := curr.Close
+		events = append(events, TradeEvent{
+			Timestamp:     ts,
+			Symbol:        pos.Symbol,
+			Action:        trigger,
+			Side:          pos.Side,
+			Quantity:      pos.Quantity,
+			Price:         execPrice,
+			Fee:           fee,
+			Slippage:      execPrice - basePrice,
+			OrderValue:    execPrice * pos.Quantity,
+			RealizedPnL:   realized - fee,
+			Leverage:      pos.Leverage,
+			Cycle:         cycle,
+			PositionAfter: 0,
+		})
+	}
+	if len(events) == 0 {
+		return nil, "", nil
+	}
+	return events, fmt.Sprintf("stop/take triggered %d position(s)", len(events)), nil
+}
+
+func limitTouched(ord PendingLimitOrder, high, low float64) bool {
+	if ord.Price <= 0 {
+		return false
+	}
+	return low <= ord.Price && ord.Price <= high
+}
+
+func pickStopTakeTrigger(pos *position, open, high, low float64) (string, float64) {
+	sl := pos.StopLoss
+	tp := pos.TakeProfit
+	if sl <= 0 && tp <= 0 {
+		return "", 0
+	}
+	var slHit, tpHit bool
+	if pos.Side == "long" {
+		if sl > 0 && low <= sl {
+			slHit = true
+		}
+		if tp > 0 && high >= tp {
+			tpHit = true
+		}
+	} else {
+		if sl > 0 && high >= sl {
+			slHit = true
+		}
+		if tp > 0 && low <= tp {
+			tpHit = true
+		}
+	}
+	if slHit && tpHit {
+		// choose closer to open
+		if closerToOpen(open, sl, tp) {
+			return "stop_loss", sl
+		}
+		return "take_profit", tp
+	}
+	if slHit {
+		return "stop_loss", sl
+	}
+	if tpHit {
+		return "take_profit", tp
+	}
+	return "", 0
+}
+
+func closerToOpen(open, a, b float64) bool {
+	da := math.Abs(open - a)
+	db := math.Abs(open - b)
+	return da <= db
 }
 
 // MinPositionSizeUSD is the minimum position size in USD to avoid dust positions
@@ -910,6 +1270,8 @@ func (r *Runner) convertPositions(priceMap map[string]float64) []kernel.Position
 			Leverage:         pos.Leverage,
 			UnrealizedPnL:    pnl,
 			UnrealizedPnLPct: pnlPct,
+			StopLoss:         pos.StopLoss,
+			TakeProfit:       pos.TakeProfit,
 			LiquidationPrice: pos.LiquidationPrice,
 			MarginUsed:       pos.Margin,
 			UpdateTime:       time.Now().UnixMilli(),
@@ -972,6 +1334,8 @@ func (r *Runner) updateState(ts int64, equity, unrealized, marginUsed float64, p
 			Side:             pos.Side,
 			Quantity:         pos.Quantity,
 			AvgPrice:         pos.EntryPrice,
+			StopLoss:         pos.StopLoss,
+			TakeProfit:       pos.TakeProfit,
 			Leverage:         pos.Leverage,
 			LiquidationPrice: pos.LiquidationPrice,
 			MarginUsed:       pos.Margin,
@@ -990,6 +1354,7 @@ func (r *Runner) updateState(ts int64, equity, unrealized, marginUsed float64, p
 	r.state.UnrealizedPnL = unrealized
 	r.state.RealizedPnL = r.account.RealizedPnL()
 	r.state.Positions = positions
+	r.state.PendingOrders = r.snapshotPendingOrders()
 	r.state.LastUpdate = time.Now().UTC()
 }
 
@@ -1410,6 +1775,7 @@ func (r *Runner) buildCheckpointFromState(state BacktestState) *Checkpoint {
 		UnrealizedPnL:   state.UnrealizedPnL,
 		RealizedPnL:     state.RealizedPnL,
 		Positions:       r.snapshotForCheckpoint(state),
+		PendingOrders:   r.snapshotPendingOrders(),
 		DecisionCycle:   state.DecisionCycle,
 		Liquidated:      state.Liquidated,
 		LiquidationNote: state.LiquidationNote,
@@ -1467,6 +1833,12 @@ func (r *Runner) applyCheckpoint(ckpt *Checkpoint) error {
 	r.state.MinEquity = ckpt.MinEquity
 	r.state.MaxDrawdownPct = ckpt.MaxDrawdownPct
 	r.state.Positions = snapshotsToMap(ckpt.Positions)
+	r.pendingOrders = nil
+	if len(ckpt.PendingOrders) > 0 {
+		r.pendingOrders = make([]PendingLimitOrder, len(ckpt.PendingOrders))
+		copy(r.pendingOrders, ckpt.PendingOrders)
+	}
+	r.state.PendingOrders = r.snapshotPendingOrders()
 	r.state.LastUpdate = time.Now().UTC()
 	r.lastCheckpoint = time.Now()
 	return nil

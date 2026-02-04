@@ -13,6 +13,8 @@ type position struct {
 	Side             string
 	Quantity         float64
 	EntryPrice       float64
+	StopLoss         float64
+	TakeProfit       float64
 	Leverage         int
 	Margin           float64
 	Notional         float64
@@ -223,6 +225,30 @@ func (acc *BacktestAccount) Positions() []*position {
 	return list
 }
 
+func (acc *BacktestAccount) UpdateStopLossTakeProfit(symbol, side string, stopLoss, takeProfit float64) error {
+	key := positionKey(symbol, side)
+	pos, ok := acc.positions[key]
+	if !ok || pos.Quantity <= epsilon {
+		return fmt.Errorf("no active %s position for %s", side, symbol)
+	}
+	if stopLoss > 0 {
+		pos.StopLoss = stopLoss
+	}
+	if takeProfit > 0 {
+		pos.TakeProfit = takeProfit
+	}
+	return nil
+}
+
+func (acc *BacktestAccount) GetStopLossTakeProfit(symbol, side string) (float64, float64, error) {
+	key := positionKey(symbol, side)
+	pos, ok := acc.positions[key]
+	if !ok || pos.Quantity <= epsilon {
+		return 0, 0, fmt.Errorf("no active %s position for %s", side, symbol)
+	}
+	return pos.StopLoss, pos.TakeProfit, nil
+}
+
 func (acc *BacktestAccount) positionLeverage(symbol, side string) int {
 	key := positionKey(symbol, side)
 	if pos, ok := acc.positions[key]; ok && pos.Quantity > epsilon {
@@ -254,6 +280,8 @@ func (acc *BacktestAccount) RestoreFromSnapshots(cash float64, realized float64,
 			Side:             snap.Side,
 			Quantity:         snap.Quantity,
 			EntryPrice:       snap.AvgPrice,
+			StopLoss:         snap.StopLoss,
+			TakeProfit:       snap.TakeProfit,
 			Leverage:         snap.Leverage,
 			Margin:           snap.MarginUsed,
 			Notional:         snap.Quantity * snap.AvgPrice,
