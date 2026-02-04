@@ -107,6 +107,9 @@ func (cfg *BacktestConfig) Validate() error {
 		return fmt.Errorf("invalid decision_timeframe: %w", err)
 	}
 	cfg.DecisionTimeframe = normalizedDecision
+	if !containsTimeframe(cfg.Timeframes, cfg.DecisionTimeframe) {
+		cfg.Timeframes = append([]string{cfg.DecisionTimeframe}, cfg.Timeframes...)
+	}
 
 	if cfg.DecisionCadenceNBars <= 0 {
 		cfg.DecisionCadenceNBars = 20
@@ -187,6 +190,15 @@ func validateFillPolicy(policy string) error {
 	}
 }
 
+func containsTimeframe(timeframes []string, target string) bool {
+	for _, tf := range timeframes {
+		if tf == target {
+			return true
+		}
+	}
+	return false
+}
+
 // SetLoadedStrategy sets the loaded strategy config from database.
 func (cfg *BacktestConfig) SetLoadedStrategy(strategy *store.StrategyConfig) {
 	cfg.loadedStrategy = strategy
@@ -211,7 +223,7 @@ func (cfg *BacktestConfig) ToStrategyConfig() *store.StrategyConfig {
 		// Override timeframes with backtest config
 		if len(cfg.Timeframes) > 0 {
 			result.Indicators.Klines.SelectedTimeframes = cfg.Timeframes
-			result.Indicators.Klines.PrimaryTimeframe = cfg.Timeframes[0]
+			result.Indicators.Klines.PrimaryTimeframe = cfg.DecisionTimeframe
 			if len(cfg.Timeframes) > 1 {
 				result.Indicators.Klines.LongerTimeframe = cfg.Timeframes[len(cfg.Timeframes)-1]
 			}
@@ -238,7 +250,7 @@ func (cfg *BacktestConfig) ToStrategyConfig() *store.StrategyConfig {
 	primaryTF := "5m"
 	longerTF := "4h"
 	if len(cfg.Timeframes) > 0 {
-		primaryTF = cfg.Timeframes[0]
+		primaryTF = cfg.DecisionTimeframe
 	}
 	if len(cfg.Timeframes) > 1 {
 		longerTF = cfg.Timeframes[len(cfg.Timeframes)-1]

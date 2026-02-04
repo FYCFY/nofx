@@ -135,10 +135,13 @@ func removeFromRunIndex(runID string) error {
 		return err
 	}
 	if idx.Runs == nil {
-		return nil
+		return os.RemoveAll(runDir(runID))
 	}
 	delete(idx.Runs, runID)
-	return saveRunIndex(idx)
+	if err := saveRunIndex(idx); err != nil {
+		return err
+	}
+	return os.RemoveAll(runDir(runID))
 }
 
 func listIndexEntries() ([]RunIndexEntry, error) {
