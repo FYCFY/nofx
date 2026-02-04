@@ -2486,6 +2486,19 @@ func (at *AutoTrader) getTakeProfitMapForPositions(positions []map[string]interf
 
 // checkPositionDrawdown checks position drawdown situation
 func (at *AutoTrader) checkPositionDrawdown() {
+	riskControl := at.config.StrategyConfig.RiskControl
+	if !riskControl.EnableDrawdownClose {
+		return
+	}
+	progressPctThreshold := riskControl.DrawdownCloseProgressPct
+	if progressPctThreshold <= 0 {
+		progressPctThreshold = 40
+	}
+	drawdownPctThreshold := riskControl.DrawdownClosePct
+	if drawdownPctThreshold <= 0 {
+		drawdownPctThreshold = 40
+	}
+
 	// Get current positions
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -2544,7 +2557,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			}
 			progress = (entryPrice - markPrice) / denom
 		}
-		if progress < 0.4 {
+		if progress*100 < progressPctThreshold {
 			continue
 		}
 
@@ -2571,8 +2584,8 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
 		}
 
-		// Check close position condition: progress >= 40% of TP target and drawdown >= 40%
-		if drawdownPct >= 40.0 {
+		// Check close position condition: progress >= threshold of TP target and drawdown >= threshold
+		if drawdownPct >= drawdownPctThreshold {
 			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | Current profit: %.2f%% | Peak profit: %.2f%% | Drawdown: %.2f%% | TP progress: %.2f%%",
 				symbol, side, currentPnLPct, peakPnLPct, drawdownPct, progress*100)
 

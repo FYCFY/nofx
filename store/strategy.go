@@ -230,6 +230,13 @@ type RiskControlConfig struct {
 	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
 	// Min AI confidence to open position (AI guided)
 	MinConfidence int `json:"min_confidence"`
+
+	// Enable drawdown-based emergency close
+	EnableDrawdownClose bool `json:"enable_drawdown_close"`
+	// Drawdown close trigger: TP progress percentage (0-100)
+	DrawdownCloseProgressPct float64 `json:"drawdown_close_progress_pct"`
+	// Drawdown close trigger: drawdown percentage from peak (0-100)
+	DrawdownClosePct float64 `json:"drawdown_close_pct"`
 }
 
 // NewStrategyStore creates a new StrategyStore
@@ -318,6 +325,9 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			MinPositionSize:                 12,  // Min 12 USDT per position (CODE ENFORCED)
 			MinRiskRewardRatio:              3.0, // Min 3:1 profit/loss ratio (AI guided)
 			MinConfidence:                   75,  // Min 75% confidence (AI guided)
+			EnableDrawdownClose:             false,
+			DrawdownCloseProgressPct:        40,
+			DrawdownClosePct:                40,
 		},
 		EnableLimitOrders: &enableLimitOrders,
 	}
