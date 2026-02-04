@@ -1821,11 +1821,18 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision,
 	if err != nil {
 		return err
 	}
+	stopLossPrice := decision.Price
+	if stopLossPrice <= 0 {
+		stopLossPrice = decision.StopLoss
+	}
+	if stopLossPrice <= 0 {
+		return fmt.Errorf("stop-loss price is required")
+	}
 	previousStopLoss := at.getExistingStopLossPrice(decision.Symbol, positionSide)
 	if err := at.trader.CancelStopLossOrders(decision.Symbol); err != nil {
 		return fmt.Errorf("failed to cancel existing stop-loss orders: %w", err)
 	}
-	if err := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, decision.Price); err != nil {
+	if err := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, stopLossPrice); err != nil {
 		if previousStopLoss > 0 {
 			if restoreErr := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, previousStopLoss); restoreErr != nil {
 				return fmt.Errorf("failed to set stop-loss: %w (restore failed: %v)", err, restoreErr)
@@ -1836,11 +1843,11 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision,
 		}
 		return err
 	}
-	actionRecord.Price = decision.Price
-	actionRecord.StopLoss = decision.Price
+	actionRecord.Price = stopLossPrice
+	actionRecord.StopLoss = stopLossPrice
 	actionRecord.Quantity = qty
 	if at.userID != "" {
-		notify.NotifyUpdateStopLoss(at.userID, at.id, decision.Symbol, decision.Price, qty)
+		notify.NotifyUpdateStopLoss(at.userID, at.id, decision.Symbol, stopLossPrice, qty)
 	}
 	return nil
 }
@@ -1864,17 +1871,24 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *kernel.Decisio
 	if err != nil {
 		return err
 	}
+	takeProfitPrice := decision.Price
+	if takeProfitPrice <= 0 {
+		takeProfitPrice = decision.TakeProfit
+	}
+	if takeProfitPrice <= 0 {
+		return fmt.Errorf("take-profit price is required")
+	}
 	if err := at.trader.CancelTakeProfitOrders(decision.Symbol); err != nil {
 		return fmt.Errorf("failed to cancel existing take-profit orders: %w", err)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, positionSide, qty, decision.Price); err != nil {
+	if err := at.trader.SetTakeProfit(decision.Symbol, positionSide, qty, takeProfitPrice); err != nil {
 		return err
 	}
-	actionRecord.Price = decision.Price
-	actionRecord.TakeProfit = decision.Price
+	actionRecord.Price = takeProfitPrice
+	actionRecord.TakeProfit = takeProfitPrice
 	actionRecord.Quantity = qty
 	if at.userID != "" {
-		notify.NotifyUpdateTakeProfit(at.userID, at.id, decision.Symbol, decision.Price, qty)
+		notify.NotifyUpdateTakeProfit(at.userID, at.id, decision.Symbol, takeProfitPrice, qty)
 	}
 	return nil
 }

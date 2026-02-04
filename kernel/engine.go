@@ -2123,6 +2123,14 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			return fmt.Errorf("%s requires symbol", d.Action)
 		}
 		if d.Price <= 0 {
+			if d.Action == "update_stop_loss" && d.StopLoss > 0 {
+				d.Price = d.StopLoss
+			}
+			if d.Action == "update_take_profit" && d.TakeProfit > 0 {
+				d.Price = d.TakeProfit
+			}
+		}
+		if d.Price <= 0 {
 			return fmt.Errorf("%s requires price > 0", d.Action)
 		}
 	}
