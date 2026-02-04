@@ -708,6 +708,39 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		logEntry := fmt.Sprintf("cancelled %d limit order(s)", removed)
 		return actionRecord, nil, logEntry, nil
 
+	case "update_stop_loss", "update_take_profit":
+		updatePrice := dec.Price
+		if updatePrice <= 0 {
+			if dec.Action == "update_stop_loss" {
+				updatePrice = dec.StopLoss
+			} else {
+				updatePrice = dec.TakeProfit
+			}
+		}
+		if updatePrice <= 0 {
+			return actionRecord, nil, "", fmt.Errorf("update price required for %s", dec.Action)
+		}
+
+		side := strings.ToLower(dec.PositionSide)
+		if side == "" {
+			side = r.resolveUniquePositionSide(symbol)
+			if side == "" {
+				return actionRecord, nil, "", fmt.Errorf("position_side required when both long/short exist")
+			}
+		}
+
+		var sl, tp float64
+		if dec.Action == "update_stop_loss" {
+			sl = updatePrice
+		} else {
+			tp = updatePrice
+		}
+		if err := r.account.UpdateStopLossTakeProfit(symbol, side, sl, tp); err != nil {
+			return actionRecord, nil, "", err
+		}
+		logEntry := fmt.Sprintf("updated %s %s to %.4f", symbol, dec.Action, updatePrice)
+		return actionRecord, nil, logEntry, nil
+
 	case "open_long":
 		qty := r.determineQuantity(dec, basePrice)
 		if qty <= 0 {
@@ -933,6 +966,29 @@ func (r *Runner) snapshotPendingOrders() []PendingLimitOrder {
 	out := make([]PendingLimitOrder, len(r.pendingOrders))
 	copy(out, r.pendingOrders)
 	return out
+}
+
+func (r *Runner) resolveUniquePositionSide(symbol string) string {
+	hasLong := false
+	hasShort := false
+	for _, pos := range r.account.Positions() {
+		if !strings.EqualFold(pos.Symbol, symbol) {
+			continue
+		}
+		if pos.Side == "long" {
+			hasLong = true
+		}
+		if pos.Side == "short" {
+			hasShort = true
+		}
+	}
+	if hasLong && !hasShort {
+		return "long"
+	}
+	if hasShort && !hasLong {
+		return "short"
+	}
+	return ""
 }
 
 func (r *Runner) toPendingOrdersForContext(ts int64) []kernel.PendingOrder {

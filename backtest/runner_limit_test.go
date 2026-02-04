@@ -3,6 +3,7 @@ package backtest
 import (
 	"testing"
 
+	"nofx/kernel"
 	"nofx/market"
 )
 
@@ -74,5 +75,32 @@ func TestPickStopTakeTriggerByOpenDistance(t *testing.T) {
 	trigger, _ := pickStopTakeTrigger(pos, 100, 110, 90)
 	if trigger != "stop_loss" {
 		t.Fatalf("expected stop_loss to be closer to open, got %s", trigger)
+	}
+}
+
+func TestUpdateStopLossAction(t *testing.T) {
+	r := &Runner{
+		account: NewBacktestAccount(10000, 0, 0),
+		feed:    testFeedWithKline("BTCUSDT", market.Kline{OpenTime: 1, Open: 100, High: 105, Low: 95, Close: 100, CloseTime: 1}),
+	}
+	_, _, _, err := r.account.Open("BTCUSDT", "long", 1, 10, 100, 1)
+	if err != nil {
+		t.Fatalf("open position: %v", err)
+	}
+	dec := kernel.Decision{
+		Symbol: "BTCUSDT",
+		Action: "update_stop_loss",
+		Price:  95,
+	}
+	_, _, _, execErr := r.executeDecision(dec, map[string]float64{"BTCUSDT": 100}, 1, 1)
+	if execErr != nil {
+		t.Fatalf("executeDecision error: %v", execErr)
+	}
+	sl, _, err := r.account.GetStopLossTakeProfit("BTCUSDT", "long")
+	if err != nil {
+		t.Fatalf("get stop loss: %v", err)
+	}
+	if sl != 95 {
+		t.Fatalf("expected stop loss 95, got %.4f", sl)
 	}
 }
