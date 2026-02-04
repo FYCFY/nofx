@@ -32,7 +32,7 @@ func TestBinanceSyncVerification(t *testing.T) {
 	}
 	db := st.GormDB()
 
-	trader := NewFuturesTrader(apiKey, secretKey, "test-user")
+	trader := NewFuturesTrader(apiKey, secretKey, "test-user", false)
 
 	traderID := "test-trader-id"
 	exchangeID := "test-exchange-id"
@@ -417,7 +417,7 @@ func TestBinanceDetailedTradeComparison(t *testing.T) {
 
 	// Get credentials from environment
 	apiKey, secretKey := getBinanceTestCredentials(t)
-	trader := NewFuturesTrader(apiKey, secretKey, "test-user")
+	trader := NewFuturesTrader(apiKey, secretKey, "test-user", false)
 
 	startTime := time.Now().UTC().Add(-24 * time.Hour)
 

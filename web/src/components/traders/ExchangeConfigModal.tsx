@@ -713,6 +713,45 @@ export function ExchangeConfigModal({
                         </div>
                       )}
 
+                      {/* Testnet toggle (CEX only) */}
+                      {(currentExchangeType === 'binance' ||
+                        currentExchangeType === 'bybit' ||
+                        currentExchangeType === 'okx' ||
+                        currentExchangeType === 'bitget') && (
+                        <div className="flex items-start gap-3">
+                          <input
+                            id="exchange-testnet"
+                            type="checkbox"
+                            checked={testnet}
+                            onChange={(e) => setTestnet(e.target.checked)}
+                            className="mt-1"
+                          />
+                          <div>
+                            <label
+                              htmlFor="exchange-testnet"
+                              className="block text-sm font-semibold"
+                              style={{ color: '#EAECEF' }}
+                            >
+                              {t('useTestnet', language)}
+                            </label>
+                            <div
+                              className="text-xs mt-1"
+                              style={{ color: '#848E9C' }}
+                            >
+                              {t('testnetDescription', language)}
+                              {currentExchangeType === 'binance' && (
+                                <>
+                                  {' '}
+                                  {language === 'zh'
+                                    ? '将使用币安 USDⓈ-M 测试网（demo-fapi），仅合约交易。'
+                                    : 'Uses Binance USDⓈ-M testnet (demo-fapi), futures only.'}
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Binance 白名单IP提示 */}
                       {currentExchangeType === 'binance' && (
                         <div

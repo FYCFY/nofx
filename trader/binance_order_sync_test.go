@@ -25,7 +25,7 @@ func getBinanceTestCredentials(t *testing.T) (string, string) {
 
 func createBinanceTestTrader(t *testing.T) *FuturesTrader {
 	apiKey, secretKey := getBinanceTestCredentials(t)
-	trader := NewFuturesTrader(apiKey, secretKey, "test-user")
+	trader := NewFuturesTrader(apiKey, secretKey, "test-user", false)
 	return trader
 }
 

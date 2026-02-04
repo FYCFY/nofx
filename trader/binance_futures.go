@@ -48,6 +48,8 @@ func getBrOrderID() string {
 type FuturesTrader struct {
 	client *futures.Client
 	spotClient *binance.Client
+	isTestnet bool
+	userStreamEnabled bool
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -69,7 +71,7 @@ type FuturesTrader struct {
 }
 
 // NewFuturesTrader creates futures trader
-func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
+func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *FuturesTrader {
 	client := futures.NewClient(apiKey, secretKey)
 	spotClient := binance.NewClient(apiKey, secretKey)
 
@@ -78,13 +80,19 @@ func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
 		client = hookRes.GetResult()
 	}
 
+	if testnet {
+		client.BaseURL = "https://demo-fapi.binance.com"
+	}
+
 	// Sync time to avoid "Timestamp ahead" error
 	syncBinanceServerTime(client)
 	syncBinanceServerTimeSpot(spotClient)
 	trader := &FuturesTrader{
-		client:        client,
-		spotClient:    spotClient,
-		cacheDuration: 15 * time.Second, // 15-second cache
+		client:            client,
+		spotClient:        spotClient,
+		cacheDuration:     15 * time.Second, // 15-second cache
+		isTestnet:         testnet,
+		userStreamEnabled: !testnet,
 	}
 
 	// Set dual-side position mode (Hedge Mode)
@@ -94,7 +102,11 @@ func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
 	}
 
 	// Start Binance user data stream (WebSocket) to avoid REST polling limits
-	trader.startUserStream()
+	if trader.userStreamEnabled {
+		trader.startUserStream()
+	} else {
+		logger.Infof("⚠️ Binance user stream disabled (testnet mode)")
+	}
 
 	return trader
 }
@@ -214,6 +226,9 @@ func (t *FuturesTrader) GetFuturesEquityUSDT() (float64, float64, error) {
 
 // GetSpotUSDTBalance returns available USDT balance in spot account.
 func (t *FuturesTrader) GetSpotUSDTBalance() (float64, error) {
+	if t.isTestnet {
+		return 0, fmt.Errorf("spot balance not supported in Binance testnet mode")
+	}
 	account, err := t.spotClient.NewGetAccountService().Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get spot account info: %w", err)
@@ -239,6 +254,9 @@ func (t *FuturesTrader) TransferUSDTFuturesToSpot(amount float64) error {
 }
 
 func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, amount float64) error {
+	if t.isTestnet {
+		return fmt.Errorf("spot<->futures transfer not supported in Binance testnet mode")
+	}
 	if amount <= 0 {
 		return fmt.Errorf("invalid transfer amount: %.8f", amount)
 	}

@@ -343,7 +343,7 @@ func TestNewFuturesTrader(t *testing.T) {
 	defer mockServer.Close()
 
 	// Test successful creation
-	trader := NewFuturesTrader("test_api_key", "test_secret_key", "test_user")
+	trader := NewFuturesTrader("test_api_key", "test_secret_key", "test_user", false)
 
 	// Modify client to use mock server
 	trader.client.BaseURL = mockServer.URL
@@ -352,6 +352,16 @@ func TestNewFuturesTrader(t *testing.T) {
 	assert.NotNil(t, trader)
 	assert.NotNil(t, trader.client)
 	assert.Equal(t, 15*time.Second, trader.cacheDuration)
+}
+
+func TestNewFuturesTraderTestnetBaseURL(t *testing.T) {
+	trader := NewFuturesTrader("test_api_key", "test_secret_key", "test_user", true)
+	if trader.client.BaseURL != "https://demo-fapi.binance.com" {
+		t.Fatalf("expected testnet base URL, got %s", trader.client.BaseURL)
+	}
+	if trader.userStreamEnabled {
+		t.Fatalf("expected user stream disabled in testnet mode")
+	}
 }
 
 // TestCalculatePositionSize tests position size calculation
