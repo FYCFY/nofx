@@ -683,7 +683,7 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 	fillPrice := r.executionPrice(symbol, basePrice, ts)
 
 	switch dec.Action {
-	case "place_buy_limit", "place_sell_limit":
+	case "place_buy_limit", "place_sell_limit", "place_limit_buy", "place_limit_sell":
 		order, err := r.placeLimitOrder(dec, ts, basePrice)
 		if err != nil {
 			return actionRecord, nil, "", err
@@ -868,7 +868,7 @@ func (r *Runner) placeLimitOrder(dec kernel.Decision, ts int64, basePrice float6
 		}
 	}
 	side := "long"
-	if dec.Action == "place_sell_limit" {
+	if dec.Action == "place_sell_limit" || dec.Action == "place_limit_sell" {
 		side = "short"
 	}
 	lev := r.resolveLeverage(dec.Leverage, dec.Symbol)
