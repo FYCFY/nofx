@@ -1821,10 +1821,19 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision,
 	if err != nil {
 		return err
 	}
+	previousStopLoss := at.getExistingStopLossPrice(decision.Symbol, positionSide)
 	if err := at.trader.CancelStopLossOrders(decision.Symbol); err != nil {
 		return fmt.Errorf("failed to cancel existing stop-loss orders: %w", err)
 	}
 	if err := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, decision.Price); err != nil {
+		if previousStopLoss > 0 {
+			if restoreErr := at.trader.SetStopLoss(decision.Symbol, positionSide, qty, previousStopLoss); restoreErr != nil {
+				return fmt.Errorf("failed to set stop-loss: %w (restore failed: %v)", err, restoreErr)
+			}
+			logger.Warnf("⚠️ [%s] Stop-loss update failed, restored previous stop-loss %.6f for %s %s",
+				at.name, previousStopLoss, decision.Symbol, positionSide)
+			return fmt.Errorf("failed to set stop-loss: %w (restored previous stop-loss)", err)
+		}
 		return err
 	}
 	actionRecord.Price = decision.Price
@@ -1834,6 +1843,20 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *kernel.Decision,
 		notify.NotifyUpdateStopLoss(at.userID, at.id, decision.Symbol, decision.Price, qty)
 	}
 	return nil
+}
+
+func (at *AutoTrader) getExistingStopLossPrice(symbol, positionSide string) float64 {
+	symbolSet := map[string]bool{market.Normalize(symbol): true}
+	openOrders := at.getOpenOrdersRawForSymbols(symbolSet)
+	if len(openOrders) == 0 {
+		return 0
+	}
+	slMap, _ := buildStopTargetMaps(openOrders)
+	key := stopTargetKey(symbol, positionSide)
+	if price, ok := slMap[key]; ok {
+		return price
+	}
+	return 0
 }
 
 func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
