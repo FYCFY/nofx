@@ -137,6 +137,7 @@ type Checkpoint struct {
 	IndicatorsState map[string]map[string]any `json:"indicators_state,omitempty"`
 	RNGSeed         int64                     `json:"rng_seed,omitempty"`
 	AICacheRef      string                    `json:"ai_cache_ref,omitempty"`
+	PeakPnLCache    map[string]float64        `json:"peak_pnl_cache,omitempty"`
 	Liquidated      bool                      `json:"liquidated"`
 	LiquidationNote string                    `json:"liquidation_note,omitempty"`
 }

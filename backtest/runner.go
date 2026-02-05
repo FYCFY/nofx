@@ -66,6 +66,7 @@ type Runner struct {
 	lockStopOnce sync.Once // Ensures lockStop is closed only once
 
 	pendingOrders []PendingLimitOrder
+	peakPnLCache  map[string]float64
 }
 
 // NewRunner constructs a backtest runner.
@@ -142,6 +143,7 @@ func NewRunner(cfg BacktestConfig, mcpClient mcp.AIClient) (*Runner, error) {
 		aiCache:        aiCache,
 		cachePath:      cachePath,
 		pendingOrders:  make([]PendingLimitOrder, 0),
+		peakPnLCache:   make(map[string]float64),
 	}
 
 	if err := r.initLock(); err != nil {
@@ -294,6 +296,11 @@ func (r *Runner) stepOnce() error {
 	if err != nil {
 		return err
 	}
+	// Pre-decision: process drawdown close (align with live trading)
+	drawdownEvents, drawdownLog, err := r.processDrawdownClose(ts, state.DecisionCycle+1)
+	if err != nil {
+		return err
+	}
 
 	callCount := state.DecisionCycle + 1
 	shouldDecide := r.shouldTriggerDecision(state.BarIndex)
@@ -312,6 +319,12 @@ func (r *Runner) stepOnce() error {
 	}
 	if preLog != "" {
 		execLog = append(execLog, preLog)
+	}
+	if len(drawdownEvents) > 0 {
+		tradeEvents = append(tradeEvents, drawdownEvents...)
+	}
+	if drawdownLog != "" {
+		execLog = append(execLog, drawdownLog)
 	}
 
 	if shouldDecide {
@@ -1004,6 +1017,134 @@ func (r *Runner) resolveUniquePositionSide(symbol string) string {
 		return "short"
 	}
 	return ""
+}
+
+func (r *Runner) prunePeakPnLCache() {
+	if len(r.peakPnLCache) == 0 {
+		return
+	}
+	active := make(map[string]bool)
+	for _, pos := range r.account.Positions() {
+		key := fmt.Sprintf("%s:%s", pos.Symbol, pos.Side)
+		active[key] = true
+	}
+	for key := range r.peakPnLCache {
+		if !active[key] {
+			delete(r.peakPnLCache, key)
+		}
+	}
+}
+
+func (r *Runner) processDrawdownClose(ts int64, cycle int) ([]TradeEvent, string, error) {
+	riskControl := r.strategyEngine.GetRiskControlConfig()
+	if !riskControl.EnableDrawdownClose {
+		return nil, "", nil
+	}
+	progressThreshold := riskControl.DrawdownCloseProgressPct
+	if progressThreshold <= 0 {
+		progressThreshold = 40
+	}
+	drawdownThreshold := riskControl.DrawdownClosePct
+	if drawdownThreshold <= 0 {
+		drawdownThreshold = 40
+	}
+
+	positions := r.account.Positions()
+	if len(positions) == 0 {
+		return nil, "", nil
+	}
+
+	r.prunePeakPnLCache()
+
+	events := make([]TradeEvent, 0)
+	logs := make([]string, 0)
+	for _, pos := range positions {
+		if pos.Quantity <= 0 {
+			continue
+		}
+		curr, _ := r.feed.decisionBarSnapshot(pos.Symbol, ts)
+		if curr == nil || curr.Close <= 0 {
+			continue
+		}
+		tpPrice := pos.TakeProfit
+		if tpPrice <= 0 {
+			continue
+		}
+		entryPrice := pos.EntryPrice
+		if entryPrice <= 0 {
+			continue
+		}
+
+		markPrice := curr.Close
+		currentPnLPct := 0.0
+		if pos.Side == "long" {
+			currentPnLPct = ((markPrice - entryPrice) / entryPrice) * float64(pos.Leverage) * 100
+		} else {
+			currentPnLPct = ((entryPrice - markPrice) / entryPrice) * float64(pos.Leverage) * 100
+		}
+
+		progress := 0.0
+		if pos.Side == "long" {
+			denom := tpPrice - entryPrice
+			if denom <= 0 {
+				continue
+			}
+			progress = (markPrice - entryPrice) / denom
+		} else {
+			denom := entryPrice - tpPrice
+			if denom <= 0 {
+				continue
+			}
+			progress = (entryPrice - markPrice) / denom
+		}
+		if progress*100 < progressThreshold {
+			continue
+		}
+
+		key := fmt.Sprintf("%s:%s", pos.Symbol, pos.Side)
+		peakPnL := r.peakPnLCache[key]
+		if peakPnL == 0 || currentPnLPct > peakPnL {
+			r.peakPnLCache[key] = currentPnLPct
+			peakPnL = currentPnLPct
+		}
+
+		drawdownPct := 0.0
+		if peakPnL > 0 && currentPnLPct < peakPnL {
+			drawdownPct = ((peakPnL - currentPnLPct) / peakPnL) * 100
+		}
+		if drawdownPct < drawdownThreshold {
+			continue
+		}
+
+		realized, fee, execPrice, err := r.account.Close(pos.Symbol, pos.Side, pos.Quantity, markPrice)
+		if err != nil {
+			return nil, "", err
+		}
+
+		trade := TradeEvent{
+			Timestamp:     ts,
+			Symbol:        pos.Symbol,
+			Action:        "drawdown_close",
+			Side:          pos.Side,
+			Quantity:      pos.Quantity,
+			Price:         execPrice,
+			Fee:           fee,
+			Slippage:      execPrice - markPrice,
+			OrderValue:    execPrice * pos.Quantity,
+			RealizedPnL:   realized,
+			Leverage:      pos.Leverage,
+			Cycle:         cycle,
+			PositionAfter: r.remainingPosition(pos.Symbol, pos.Side),
+		}
+		events = append(events, trade)
+		delete(r.peakPnLCache, key)
+		logs = append(logs, fmt.Sprintf("drawdown close %s %s (dd=%.2f%%, progress=%.2f%%)", pos.Symbol, pos.Side, drawdownPct, progress*100))
+	}
+
+	if len(events) == 0 {
+		return nil, "", nil
+	}
+	return events, strings.Join(logs, " | "), nil
 }
 
 func (r *Runner) toPendingOrdersForContext(ts int64) []kernel.PendingOrder {
@@ -1866,6 +2007,7 @@ func (r *Runner) buildCheckpointFromState(state BacktestState) *Checkpoint {
 		MinEquity:       state.MinEquity,
 		MaxDrawdownPct:  state.MaxDrawdownPct,
 		AICacheRef:      r.cachePath,
+		PeakPnLCache:    r.snapshotPeakPnLCache(),
 	}
 }
 
@@ -1916,6 +2058,15 @@ func (r *Runner) applyCheckpoint(ckpt *Checkpoint) error {
 	r.state.MinEquity = ckpt.MinEquity
 	r.state.MaxDrawdownPct = ckpt.MaxDrawdownPct
 	r.state.Positions = snapshotsToMap(ckpt.Positions)
+	r.peakPnLCache = nil
+	if len(ckpt.PeakPnLCache) > 0 {
+		r.peakPnLCache = make(map[string]float64, len(ckpt.PeakPnLCache))
+		for k, v := range ckpt.PeakPnLCache {
+			r.peakPnLCache[k] = v
+		}
+	} else {
+		r.peakPnLCache = make(map[string]float64)
+	}
 	r.pendingOrders = nil
 	if len(ckpt.PendingOrders) > 0 {
 		r.pendingOrders = make([]PendingLimitOrder, len(ckpt.PendingOrders))
@@ -1934,6 +2085,17 @@ func snapshotsToMap(snaps []PositionSnapshot) map[string]PositionSnapshot {
 		positions[key] = snap
 	}
 	return positions
+}
+
+func (r *Runner) snapshotPeakPnLCache() map[string]float64 {
+	if len(r.peakPnLCache) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(r.peakPnLCache))
+	for k, v := range r.peakPnLCache {
+		out[k] = v
+	}
+	return out
 }
 
 func sortDecisionsByPriority(decisions []kernel.Decision) []kernel.Decision {
