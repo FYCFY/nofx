@@ -108,6 +108,22 @@ func (acc *BacktestAccount) Open(symbol, side string, quantity float64, leverage
 	return pos, fee, execPrice, nil
 }
 
+// EstimateOpenCost returns the required cash (margin + fee) to open a position.
+// It mirrors the same slippage and fee calculation used in Open().
+func (acc *BacktestAccount) EstimateOpenCost(side string, quantity float64, leverage int, price float64) (float64, error) {
+	if quantity <= 0 {
+		return 0, fmt.Errorf("quantity must be positive")
+	}
+	if leverage <= 0 {
+		return 0, fmt.Errorf("leverage must be positive")
+	}
+	execPrice := applySlippage(price, acc.slippageRate, side, true)
+	notional := execPrice * quantity
+	margin := notional / float64(leverage)
+	fee := notional * acc.feeRate
+	return margin + fee, nil
+}
+
 func (acc *BacktestAccount) Close(symbol, side string, quantity float64, price float64) (float64, float64, float64, error) {
 	key := positionKey(symbol, side)
 	pos, ok := acc.positions[key]

@@ -688,6 +688,11 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		if err != nil {
 			return actionRecord, nil, "", err
 		}
+		if cost, err := r.account.EstimateOpenCost(order.Side, order.Quantity, order.Leverage, order.Price); err == nil {
+			if cost > r.account.Cash()+epsilon {
+				return actionRecord, nil, "", fmt.Errorf("insufficient cash for limit order: need %.2f", cost)
+			}
+		}
 		actionRecord.Price = order.Price
 		actionRecord.Quantity = order.Quantity
 		actionRecord.Leverage = order.Leverage
@@ -746,6 +751,11 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		if qty <= 0 {
 			return actionRecord, nil, "", fmt.Errorf("invalid qty")
 		}
+		if cost, err := r.account.EstimateOpenCost("long", qty, usedLeverage, fillPrice); err == nil {
+			if cost > r.account.Cash()+epsilon {
+				return actionRecord, nil, "", fmt.Errorf("insufficient cash: need %.2f", cost)
+			}
+		}
 		pos, fee, execPrice, err := r.account.Open(symbol, "long", qty, usedLeverage, fillPrice, ts)
 		if err != nil {
 			return actionRecord, nil, "", err
@@ -775,6 +785,11 @@ func (r *Runner) executeDecision(dec kernel.Decision, priceMap map[string]float6
 		qty := r.determineQuantity(dec, basePrice)
 		if qty <= 0 {
 			return actionRecord, nil, "", fmt.Errorf("invalid qty")
+		}
+		if cost, err := r.account.EstimateOpenCost("short", qty, usedLeverage, fillPrice); err == nil {
+			if cost > r.account.Cash()+epsilon {
+				return actionRecord, nil, "", fmt.Errorf("insufficient cash: need %.2f", cost)
+			}
 		}
 		pos, fee, execPrice, err := r.account.Open(symbol, "short", qty, usedLeverage, fillPrice, ts)
 		if err != nil {
@@ -1055,6 +1070,7 @@ func (r *Runner) processPendingLimitOrders(ts int64, cycle int) ([]TradeEvent, s
 	}
 	remaining := make([]PendingLimitOrder, 0, len(r.pendingOrders))
 	events := make([]TradeEvent, 0)
+	skipped := 0
 	for _, ord := range r.pendingOrders {
 		curr, _ := r.feed.decisionBarSnapshot(ord.Symbol, ts)
 		if curr == nil || curr.Close <= 0 {
@@ -1067,6 +1083,10 @@ func (r *Runner) processPendingLimitOrders(ts int64, cycle int) ([]TradeEvent, s
 		}
 		pos, fee, execPrice, err := r.account.Open(ord.Symbol, ord.Side, ord.Quantity, ord.Leverage, ord.Price, ts)
 		if err != nil {
+			if strings.Contains(err.Error(), "insufficient cash") {
+				skipped++
+				continue
+			}
 			return nil, "", err
 		}
 		_ = r.account.UpdateStopLossTakeProfit(ord.Symbol, ord.Side, ord.StopLoss, ord.TakeProfit)
@@ -1089,9 +1109,16 @@ func (r *Runner) processPendingLimitOrders(ts int64, cycle int) ([]TradeEvent, s
 	}
 	r.pendingOrders = remaining
 	if len(events) == 0 {
+		if skipped > 0 {
+			return nil, fmt.Sprintf("skipped %d limit order(s) due to insufficient cash", skipped), nil
+		}
 		return nil, "", nil
 	}
-	return events, fmt.Sprintf("filled %d limit order(s)", len(events)), nil
+	logEntry := fmt.Sprintf("filled %d limit order(s)", len(events))
+	if skipped > 0 {
+		logEntry = fmt.Sprintf("%s | skipped %d due to insufficient cash", logEntry, skipped)
+	}
+	return events, logEntry, nil
 }
 
 func (r *Runner) processStopTake(ts int64, cycle int) ([]TradeEvent, string, error) {
