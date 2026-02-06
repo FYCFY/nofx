@@ -83,7 +83,6 @@ type AutoTraderConfig struct {
 
 	// Account configuration
 	InitialBalance float64 // Initial balance (for P&L calculation, must be set manually)
-	TargetFuturesEquity float64 // Target futures equity (USDT) for daily rebalance
 
 	// Risk control (only as hints, AI can make autonomous decisions)
 	MaxDailyLoss    float64       // Maximum daily loss percentage (hint)
@@ -2384,11 +2383,16 @@ func (at *AutoTrader) startDrawdownMonitor() {
 }
 
 func (at *AutoTrader) startFuturesBalanceGuard() {
-	if at.config.Exchange != "binance" || at.config.TargetFuturesEquity <= 0 {
+	if at.config.Exchange != "binance" {
 		return
 	}
 	if at.config.BinanceTestnet {
 		logger.Infof("⚠️ [%s] Futures balance guard disabled on Binance testnet", at.name)
+		return
+	}
+	fundTransferCfg, ok := at.getEnabledFundTransferConfig()
+	if !ok {
+		logger.Infof("ℹ️ [%s] Futures balance guard disabled: strategy fund_transfer not enabled", at.name)
 		return
 	}
 
@@ -2407,17 +2411,21 @@ func (at *AutoTrader) startFuturesBalanceGuard() {
 			location = time.FixedZone("CST", 8*3600)
 		}
 
-		logger.Infof("🏦 [%s] Futures balance guard enabled (target %.2f USDT, daily 00:00 Beijing)",
-			at.name, at.config.TargetFuturesEquity)
+		logger.Infof("🏦 [%s] Futures balance guard enabled (mode %s, target %.2f USDT, daily %s Beijing)",
+			at.name, fundTransferCfg.Mode, fundTransferCfg.TargetFuturesAvailableBalance, fundTransferCfg.TriggerTime)
 
 		for {
-			next := nextBeijingMidnight(time.Now(), location)
+			next, err := nextBeijingTriggerTime(time.Now(), location, fundTransferCfg.TriggerTime)
+			if err != nil {
+				logger.Infof("⚠️ [%s] Invalid fund_transfer trigger_time %q: %v", at.name, fundTransferCfg.TriggerTime, err)
+				return
+			}
 			wait := time.Until(next)
 			timer := time.NewTimer(wait)
 
 			select {
 			case <-timer.C:
-				at.rebalanceFuturesBalance()
+				at.rebalanceFuturesBalance(fundTransferCfg)
 			case <-at.stopMonitorCh:
 				timer.Stop()
 				logger.Infof("[%s] ⏹ Futures balance guard stopped", at.name)
@@ -2427,70 +2435,148 @@ func (at *AutoTrader) startFuturesBalanceGuard() {
 	}()
 }
 
-func nextBeijingMidnight(now time.Time, location *time.Location) time.Time {
-	local := now.In(location)
-	year, month, day := local.Date()
-	next := time.Date(year, month, day, 0, 0, 0, 0, location).Add(24 * time.Hour)
-	return next
+func (at *AutoTrader) getEnabledFundTransferConfig() (*store.FundTransferConfig, bool) {
+	if at.config.StrategyConfig == nil || at.config.StrategyConfig.FundTransfer == nil {
+		return nil, false
+	}
+	ft := *at.config.StrategyConfig.FundTransfer
+	if !ft.Enabled {
+		return nil, false
+	}
+	if ft.Mode == "" {
+		ft.Mode = store.FundTransferModeFuturesToSpot
+	}
+	if ft.TriggerTime == "" {
+		ft.TriggerTime = "00:00"
+	}
+	if ft.MinTransferAmount <= 0 {
+		ft.MinTransferAmount = 0.01
+	}
+	if ft.TargetFuturesAvailableBalance < 0 {
+		logger.Infof("⚠️ [%s] Invalid fund_transfer target_futures_available_balance %.4f", at.name, ft.TargetFuturesAvailableBalance)
+		return nil, false
+	}
+	switch ft.Mode {
+	case store.FundTransferModeFuturesToSpot, store.FundTransferModeBidirectional:
+	default:
+		logger.Infof("⚠️ [%s] Invalid fund_transfer mode: %s", at.name, ft.Mode)
+		return nil, false
+	}
+	if _, _, err := parseTriggerTimeHHMM(ft.TriggerTime); err != nil {
+		logger.Infof("⚠️ [%s] Invalid fund_transfer trigger_time: %s", at.name, ft.TriggerTime)
+		return nil, false
+	}
+	return &ft, true
 }
 
-func (at *AutoTrader) rebalanceFuturesBalance() {
+func parseTriggerTimeHHMM(triggerTime string) (int, int, error) {
+	if len(triggerTime) != 5 || triggerTime[2] != ':' {
+		return 0, 0, fmt.Errorf("expected HH:mm")
+	}
+	hour, err := strconv.Atoi(triggerTime[:2])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid hour")
+	}
+	minute, err := strconv.Atoi(triggerTime[3:])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid minute")
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, 0, fmt.Errorf("out of range")
+	}
+	return hour, minute, nil
+}
+
+func nextBeijingTriggerTime(now time.Time, location *time.Location, triggerTime string) (time.Time, error) {
+	hour, minute, err := parseTriggerTimeHHMM(triggerTime)
+	if err != nil {
+		return time.Time{}, err
+	}
+	local := now.In(location)
+	year, month, day := local.Date()
+	next := time.Date(year, month, day, hour, minute, 0, 0, location)
+	if !next.After(local) {
+		next = next.Add(24 * time.Hour)
+	}
+	return next, nil
+}
+
+type fundTransferDecision struct {
+	direction string
+	amount    float64
+	reason    string
+}
+
+func decideFundTransfer(futuresAvailable, target, minTransfer float64, mode string) fundTransferDecision {
+	diff := target - futuresAvailable
+	if math.Abs(diff) < minTransfer {
+		return fundTransferDecision{reason: "within_threshold"}
+	}
+	if diff < 0 {
+		return fundTransferDecision{
+			direction: "futures_to_spot",
+			amount:    -diff,
+			reason:    "excess_futures_available",
+		}
+	}
+	if mode == store.FundTransferModeBidirectional {
+		return fundTransferDecision{
+			direction: "spot_to_futures",
+			amount:    diff,
+			reason:    "futures_available_below_target",
+		}
+	}
+	return fundTransferDecision{reason: "mode_futures_to_spot_only"}
+}
+
+func (at *AutoTrader) rebalanceFuturesBalance(ft *store.FundTransferConfig) {
 	bt, ok := at.trader.(*FuturesTrader)
 	if !ok {
 		logger.Infof("⚠️ [%s] Futures balance guard only supports Binance futures", at.name)
 		return
 	}
 
-	target := at.config.TargetFuturesEquity
-	if target <= 0 {
-		return
-	}
-
-	equity, available, err := bt.GetFuturesEquityUSDT()
+	futuresAvailable, err := bt.GetFuturesAvailableBalanceUSDT()
 	if err != nil {
-		logger.Infof("⚠️ [%s] Failed to get futures equity: %v", at.name, err)
+		logger.Infof("⚠️ [%s] Failed to get futures available balance: %v", at.name, err)
 		return
 	}
-
-	diff := target - equity
-	if math.Abs(diff) < 0.01 {
-		logger.Infof("🏦 [%s] Futures equity already near target: %.2f USDT (target %.2f)", at.name, equity, target)
+	decision := decideFundTransfer(futuresAvailable, ft.TargetFuturesAvailableBalance, ft.MinTransferAmount, ft.Mode)
+	if decision.direction == "" {
+		logger.Infof("🏦 [%s] Fund transfer skipped (%s): futures available %.2f, target %.2f, min %.2f, mode %s",
+			at.name, decision.reason, futuresAvailable, ft.TargetFuturesAvailableBalance, ft.MinTransferAmount, ft.Mode)
 		return
 	}
-
-	if diff > 0 {
+	if decision.direction == "spot_to_futures" {
 		spotAvailable, err := bt.GetSpotUSDTBalance()
 		if err != nil {
 			logger.Infof("⚠️ [%s] Failed to get spot balance: %v", at.name, err)
 			return
 		}
-
-		transferAmount := math.Min(diff, spotAvailable)
+		transferAmount := math.Min(decision.amount, spotAvailable)
 		if transferAmount <= 0 {
-			logger.Infof("⚠️ [%s] Spot balance insufficient: need %.2f, available %.2f", at.name, diff, spotAvailable)
+			logger.Infof("⚠️ [%s] Spot balance insufficient: need %.2f, available %.2f", at.name, decision.amount, spotAvailable)
 			return
 		}
 		if err := bt.TransferUSDTSpotToFutures(transferAmount); err != nil {
 			logger.Infof("❌ [%s] Spot→Futures transfer failed: %v", at.name, err)
 			return
 		}
-		logger.Infof("✅ [%s] Spot→Futures transfer success: %.2f USDT (equity %.2f → target %.2f)",
-			at.name, transferAmount, equity, target)
+		logger.Infof("✅ [%s] Spot→Futures transfer success: %.2f USDT (futures available %.2f -> target %.2f)",
+			at.name, transferAmount, futuresAvailable, ft.TargetFuturesAvailableBalance)
 		return
 	}
-
-	excess := -diff
-	transferAmount := math.Min(excess, available)
+	transferAmount := math.Min(decision.amount, futuresAvailable)
 	if transferAmount <= 0 {
-		logger.Infof("⚠️ [%s] Futures available balance insufficient: need %.2f, available %.2f", at.name, excess, available)
+		logger.Infof("⚠️ [%s] Futures available balance insufficient: need %.2f, available %.2f", at.name, decision.amount, futuresAvailable)
 		return
 	}
 	if err := bt.TransferUSDTFuturesToSpot(transferAmount); err != nil {
 		logger.Infof("❌ [%s] Futures→Spot transfer failed: %v", at.name, err)
 		return
 	}
-	logger.Infof("✅ [%s] Futures→Spot transfer success: %.2f USDT (equity %.2f → target %.2f)",
-		at.name, transferAmount, equity, target)
+	logger.Infof("✅ [%s] Futures→Spot transfer success: %.2f USDT (futures available %.2f -> target %.2f)",
+		at.name, transferAmount, futuresAvailable, ft.TargetFuturesAvailableBalance)
 }
 func (at *AutoTrader) getTakeProfitMapForPositions(positions []map[string]interface{}) map[string]float64 {
 	if len(positions) == 0 {

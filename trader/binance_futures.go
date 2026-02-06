@@ -46,9 +46,9 @@ func getBrOrderID() string {
 
 // FuturesTrader Binance futures trader
 type FuturesTrader struct {
-	client *futures.Client
-	spotClient *binance.Client
-	isTestnet bool
+	client            *futures.Client
+	spotClient        *binance.Client
+	isTestnet         bool
 	userStreamEnabled bool
 
 	// Balance cache
@@ -222,6 +222,16 @@ func (t *FuturesTrader) GetFuturesEquityUSDT() (float64, float64, error) {
 
 	equity := totalWalletBalance + totalUnrealizedProfit
 	return equity, availableBalance, nil
+}
+
+// GetFuturesAvailableBalanceUSDT returns available USDT balance in UM futures account.
+func (t *FuturesTrader) GetFuturesAvailableBalanceUSDT() (float64, error) {
+	balance, err := t.GetBalance()
+	if err != nil {
+		return 0, err
+	}
+	availableBalance, _ := balance["availableBalance"].(float64)
+	return availableBalance, nil
 }
 
 // GetSpotUSDTBalance returns available USDT balance in spot account.

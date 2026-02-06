@@ -19,13 +19,14 @@ func NewTraderStore(db *gorm.DB) *TraderStore {
 
 // Trader trader configuration
 type Trader struct {
-	ID                  string    `gorm:"primaryKey" json:"id"`
-	UserID              string    `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
-	Name                string    `gorm:"column:name;not null" json:"name"`
-	AIModelID           string    `gorm:"column:ai_model_id;not null" json:"ai_model_id"`
-	ExchangeID          string    `gorm:"column:exchange_id;not null" json:"exchange_id"`
-	StrategyID          string    `gorm:"column:strategy_id;default:''" json:"strategy_id"`
-	InitialBalance      float64   `gorm:"column:initial_balance;not null" json:"initial_balance"`
+	ID             string  `gorm:"primaryKey" json:"id"`
+	UserID         string  `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
+	Name           string  `gorm:"column:name;not null" json:"name"`
+	AIModelID      string  `gorm:"column:ai_model_id;not null" json:"ai_model_id"`
+	ExchangeID     string  `gorm:"column:exchange_id;not null" json:"exchange_id"`
+	StrategyID     string  `gorm:"column:strategy_id;default:''" json:"strategy_id"`
+	InitialBalance float64 `gorm:"column:initial_balance;not null" json:"initial_balance"`
+	// Deprecated: moved to strategy-level fund_transfer configuration.
 	TargetFuturesEquity float64   `gorm:"column:target_futures_equity;default:0" json:"target_futures_equity"`
 	ScanIntervalMinutes int       `gorm:"column:scan_interval_minutes;default:3" json:"scan_interval_minutes"`
 	IsRunning           bool      `gorm:"column:is_running;default:false" json:"is_running"`
@@ -129,7 +130,6 @@ func (s *TraderStore) Update(trader *Trader) error {
 		"strategy_id":         trader.StrategyID,
 		"is_cross_margin":     trader.IsCrossMargin,
 		"show_in_competition": trader.ShowInCompetition,
-		"target_futures_equity": trader.TargetFuturesEquity,
 	}
 
 	// Only update these if > 0

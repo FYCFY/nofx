@@ -31,6 +31,40 @@ func validateStrategyConfig(config *store.StrategyConfig) []string {
 	return warnings
 }
 
+func validateFundTransferConfig(config *store.StrategyConfig) error {
+	if config == nil || config.FundTransfer == nil {
+		return nil
+	}
+
+	ft := config.FundTransfer
+	if ft.Mode == "" {
+		ft.Mode = store.FundTransferModeFuturesToSpot
+	}
+	switch ft.Mode {
+	case store.FundTransferModeFuturesToSpot, store.FundTransferModeBidirectional:
+	default:
+		return fmt.Errorf("invalid fund_transfer.mode: %s", ft.Mode)
+	}
+
+	if ft.TriggerTime == "" {
+		ft.TriggerTime = "00:00"
+	}
+	if len(ft.TriggerTime) != 5 || ft.TriggerTime[2] != ':' {
+		return fmt.Errorf("invalid fund_transfer.trigger_time, expected HH:mm")
+	}
+	if _, err := time.Parse("15:04", ft.TriggerTime); err != nil {
+		return fmt.Errorf("invalid fund_transfer.trigger_time, expected HH:mm")
+	}
+
+	if ft.TargetFuturesAvailableBalance < 0 {
+		return fmt.Errorf("fund_transfer.target_futures_available_balance must be >= 0")
+	}
+	if ft.MinTransferAmount < 0 {
+		return fmt.Errorf("fund_transfer.min_transfer_amount must be >= 0")
+	}
+	return nil
+}
+
 // handlePublicStrategies Get public strategies for strategy market (no auth required)
 func (s *Server) handlePublicStrategies(c *gin.Context) {
 	strategies, err := s.store.Strategy().ListPublic()
@@ -156,6 +190,10 @@ func (s *Server) handleCreateStrategy(c *gin.Context) {
 		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
+	if err := validateFundTransferConfig(&req.Config); err != nil {
+		SafeBadRequest(c, err.Error())
+		return
+	}
 
 	// Serialize configuration
 	configJSON, err := json.Marshal(req.Config)
@@ -224,6 +262,10 @@ func (s *Server) handleUpdateStrategy(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		SafeBadRequest(c, "Invalid request parameters")
+		return
+	}
+	if err := validateFundTransferConfig(&req.Config); err != nil {
+		SafeBadRequest(c, err.Error())
 		return
 	}
 

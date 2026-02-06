@@ -35,6 +35,7 @@ import { confirmToast, notify } from '../lib/notify'
 import { CoinSourceEditor } from '../components/strategy/CoinSourceEditor'
 import { IndicatorEditor } from '../components/strategy/IndicatorEditor'
 import { RiskControlEditor } from '../components/strategy/RiskControlEditor'
+import { FundTransferEditor } from '../components/strategy/FundTransferEditor'
 import { PromptSectionsEditor } from '../components/strategy/PromptSectionsEditor'
 import { PublishSettingsEditor } from '../components/strategy/PublishSettingsEditor'
 import { GridConfigEditor, defaultGridConfig } from '../components/strategy/GridConfigEditor'
@@ -64,6 +65,7 @@ export function StrategyStudioPage() {
     coinSource: true,
     indicators: false,
     riskControl: false,
+    fundTransfer: false,
     orderExecution: false,
     promptSections: false,
     customPrompt: false,
@@ -498,6 +500,7 @@ export function StrategyStudioPage() {
       coinSource: { zh: '币种来源', en: 'Coin Source' },
       indicators: { zh: '技术指标', en: 'Indicators' },
       riskControl: { zh: '风控参数', en: 'Risk Control' },
+      fundTransfer: { zh: '资金划转', en: 'Fund Transfer' },
       orderExecution: { zh: '执行设置', en: 'Execution' },
       promptSections: { zh: 'Prompt 编辑', en: 'Prompt Editor' },
       customPrompt: { zh: '附加提示', en: 'Extra Prompt' },
@@ -609,6 +612,21 @@ export function StrategyStudioPage() {
         <RiskControlEditor
           config={editingConfig.risk_control}
           onChange={(riskControl) => updateConfig('risk_control', riskControl)}
+          disabled={selectedStrategy?.is_default}
+          language={language}
+        />
+      ),
+    },
+    {
+      key: 'fundTransfer' as const,
+      icon: Zap,
+      color: '#F0B90B',
+      title: t('fundTransfer'),
+      forStrategyType: 'ai_trading' as const,
+      content: editingConfig && (
+        <FundTransferEditor
+          config={editingConfig.fund_transfer}
+          onChange={(fundTransfer) => updateConfig('fund_transfer', fundTransfer)}
           disabled={selectedStrategy?.is_default}
           language={language}
         />

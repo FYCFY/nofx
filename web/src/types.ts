@@ -183,7 +183,6 @@ export interface CreateTraderRequest {
   exchange_id: string
   strategy_id?: string // 策略ID（新版，使用保存的策略配置）
   initial_balance?: number // 可选：创建时由后端自动获取，编辑时可手动更新
-  target_futures_equity?: number // 合约目标权益（USDT）
   scan_interval_minutes?: number
   is_cross_margin?: boolean
   show_in_competition?: boolean // 是否在竞技场显示
@@ -289,7 +288,6 @@ export interface TraderConfigData {
   show_in_competition: boolean  // 是否在竞技场显示
   scan_interval_minutes: number
   initial_balance: number
-  target_futures_equity?: number
   is_running: boolean
   // 以下为旧版字段（向后兼容）
   btc_eth_leverage?: number
@@ -522,8 +520,17 @@ export interface StrategyConfig {
   risk_control: RiskControlConfig;
   enable_limit_orders?: boolean;
   prompt_sections?: PromptSectionsConfig;
+  fund_transfer?: FundTransferConfig;
   // Grid trading configuration (only used when strategy_type is 'grid_trading')
   grid_config?: GridStrategyConfig;
+}
+
+export interface FundTransferConfig {
+  enabled: boolean;
+  mode: 'futures_to_spot' | 'bidirectional';
+  trigger_time: string; // HH:mm (Beijing time)
+  target_futures_available_balance: number;
+  min_transfer_amount: number;
 }
 
 // Grid trading specific configuration
