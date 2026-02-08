@@ -83,6 +83,24 @@ type FuturesTrader struct {
 	wsTradesMaxSize int
 }
 
+func (t *FuturesTrader) fetchAccountSnapshotWS() (*BinanceAccountSnapshot, error) {
+	if t.wsGateway == nil {
+		return nil, fmt.Errorf("binance ws gateway not initialized")
+	}
+	// Retry with extended timeout to reduce transient timeout failures.
+	timeouts := []time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second}
+	var lastErr error
+	for i, timeout := range timeouts {
+		snap, err := t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: timeout})
+		if err == nil {
+			return snap, nil
+		}
+		lastErr = err
+		logger.Infof("⚠️ Binance WS account snapshot attempt %d/%d failed (timeout=%s): %v", i+1, len(timeouts), timeout, err)
+	}
+	return nil, fmt.Errorf("all ws account snapshot attempts failed: %w", lastErr)
+}
+
 // NewFuturesTrader creates futures trader
 func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *FuturesTrader {
 	client := futures.NewClient(apiKey, secretKey)
@@ -190,16 +208,14 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 		}
 		t.balanceCacheMutex.RUnlock()
 
-		if t.wsGateway == nil {
-			return nil, fmt.Errorf("binance ws gateway not initialized")
-		}
-		snap, err := t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+		snap, err := t.fetchAccountSnapshotWS()
 		if err != nil {
 			t.balanceCacheMutex.RLock()
-			if t.cachedBalance != nil && time.Since(t.balanceCacheTime) < 15*time.Minute {
+			if t.cachedBalance != nil {
 				cached := t.cachedBalance
+				cacheAge := time.Since(t.balanceCacheTime)
 				t.balanceCacheMutex.RUnlock()
-				logger.Infof("⚠️ Binance WS balance query failed, returning stale cached balance: %v", err)
+				logger.Infof("⚠️ Binance WS balance query failed, returning cached balance (age=%s): %v", cacheAge.Round(time.Second), err)
 				return cached, nil
 			}
 			t.balanceCacheMutex.RUnlock()
@@ -361,16 +377,14 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 		}
 		t.positionsCacheMutex.RUnlock()
 
-		if t.wsGateway == nil {
-			return nil, fmt.Errorf("binance ws gateway not initialized")
-		}
-		snap, err := t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+		snap, err := t.fetchAccountSnapshotWS()
 		if err != nil {
 			t.positionsCacheMutex.RLock()
-			if t.cachedPositions != nil && time.Since(t.positionsCacheTime) < 15*time.Minute {
+			if t.cachedPositions != nil {
 				cached := t.cachedPositions
+				cacheAge := time.Since(t.positionsCacheTime)
 				t.positionsCacheMutex.RUnlock()
-				logger.Infof("⚠️ Binance WS positions query failed, returning stale cached positions: %v", err)
+				logger.Infof("⚠️ Binance WS positions query failed, returning cached positions (age=%s): %v", cacheAge.Round(time.Second), err)
 				return cached, nil
 			}
 			t.positionsCacheMutex.RUnlock()
