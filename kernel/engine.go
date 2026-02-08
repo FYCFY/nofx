@@ -128,6 +128,7 @@ type Context struct {
 	CurrentTime        string                             `json:"current_time"`
 	RuntimeMinutes     int                                `json:"runtime_minutes"`
 	CallCount          int                                `json:"call_count"`
+	Exchange           string                             `json:"-"`
 	Account            AccountInfo                        `json:"account"`
 	Positions          []PositionInfo                     `json:"positions"`
 	CandidateCoins     []CandidateCoin                    `json:"candidate_coins"`
@@ -417,9 +418,28 @@ func fetchMarketDataWithStrategy(ctx *Context, engine *StrategyEngine) error {
 
 	logger.Infof("📊 Strategy timeframes: %v, Primary: %s, Kline count: %d", timeframes, primaryTimeframe, klineCount)
 
+	if strings.EqualFold(ctx.Exchange, "binance") {
+		symbolSet := make(map[string]struct{})
+		for _, pos := range ctx.Positions {
+			symbolSet[pos.Symbol] = struct{}{}
+		}
+		for _, coin := range ctx.CandidateCoins {
+			symbolSet[coin.Symbol] = struct{}{}
+		}
+		symbols := make([]string, 0, len(symbolSet))
+		for s := range symbolSet {
+			symbols = append(symbols, s)
+		}
+		if len(symbols) > 0 {
+			if err := market.EnsureBinanceWSSubscriptions(symbols, timeframes); err != nil {
+				logger.Infof("⚠️  Failed to ensure Binance WS subscriptions: %v", err)
+			}
+		}
+	}
+
 	// 1. First fetch data for position coins (must fetch)
 	for _, pos := range ctx.Positions {
-		data, err := market.GetWithTimeframes(pos.Symbol, timeframes, primaryTimeframe, klineCount)
+		data, err := market.GetWithTimeframesForExchange(pos.Symbol, ctx.Exchange, timeframes, primaryTimeframe, klineCount)
 		if err != nil {
 			logger.Infof("⚠️  Failed to fetch market data for position %s: %v", pos.Symbol, err)
 			continue
@@ -440,7 +460,7 @@ func fetchMarketDataWithStrategy(ctx *Context, engine *StrategyEngine) error {
 			continue
 		}
 
-		data, err := market.GetWithTimeframes(coin.Symbol, timeframes, primaryTimeframe, klineCount)
+		data, err := market.GetWithTimeframesForExchange(coin.Symbol, ctx.Exchange, timeframes, primaryTimeframe, klineCount)
 		if err != nil {
 			logger.Infof("⚠️  Failed to fetch market data for %s: %v", coin.Symbol, err)
 			continue
@@ -1520,6 +1540,32 @@ func (e *StrategyEngine) formatMarketData(data *market.Data) string {
 		if indicators.EnableFundingRate {
 			sb.WriteString(fmt.Sprintf("Funding Rate: %.2e\n\n", data.FundingRate))
 		}
+	}
+
+	if data.MarketSource != "" || len(data.LiveKline) > 0 || data.IsStale {
+		sb.WriteString("Realtime Snapshot:\n\n")
+		if data.MarketSource != "" {
+			sb.WriteString(fmt.Sprintf("Source: %s\n", data.MarketSource))
+		}
+		if data.IsStale {
+			sb.WriteString("Stale: true\n")
+		} else {
+			sb.WriteString("Stale: false\n")
+		}
+		if ts, ok := data.DataFreshness["mark_price"]; ok && ts > 0 {
+			sb.WriteString(fmt.Sprintf("Mark Price Update Time: %d\n", ts))
+		}
+		if ts, ok := data.DataFreshness["funding_rate"]; ok && ts > 0 {
+			sb.WriteString(fmt.Sprintf("Funding Update Time: %d\n", ts))
+		}
+		for tf, bar := range data.LiveKline {
+			if bar == nil {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("Live Kline (%s): O %.4f H %.4f L %.4f C %.4f V %.4f T %d\n",
+				tf, bar.Open, bar.High, bar.Low, bar.Close, bar.Volume, bar.Time))
+		}
+		sb.WriteString("\n")
 	}
 
 	if len(data.TimeframeData) > 0 {

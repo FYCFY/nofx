@@ -10,6 +10,7 @@ import (
 	"nofx/provider/coinank/coinank_api"
 	"nofx/provider/coinank/coinank_enum"
 	"nofx/provider/hyperliquid"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +27,14 @@ type FundingRateCache struct {
 var (
 	fundingRateMap sync.Map // map[string]*FundingRateCache
 	frCacheTTL     = 1 * time.Hour
+
+	binancePromptDataCache sync.Map // map[string]*cachedMarketData
 )
+
+type cachedMarketData struct {
+	Data      *Data
+	UpdatedAt time.Time
+}
 
 // Note: Kline data now uses free/open API (coinank_api.Kline) which doesn't require authentication
 
@@ -247,6 +255,19 @@ func Get(symbol string) (*Data, error) {
 // primaryTimeframe: primary timeframe (used for calculating current indicators), defaults to timeframes[0]
 // count: number of K-lines for each timeframe
 func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe string, count int) (*Data, error) {
+	return getWithTimeframesCore(symbol, timeframes, primaryTimeframe, count)
+}
+
+// GetWithTimeframesForExchange retrieves market data with exchange-specific realtime routing.
+// For Binance, it enriches prompt data with WS realtime snapshot and stale metadata.
+func GetWithTimeframesForExchange(symbol, exchange string, timeframes []string, primaryTimeframe string, count int) (*Data, error) {
+	if strings.EqualFold(strings.TrimSpace(exchange), "binance") {
+		return getWithTimeframesBinanceWS(symbol, timeframes, primaryTimeframe, count)
+	}
+	return getWithTimeframesCore(symbol, timeframes, primaryTimeframe, count)
+}
+
+func getWithTimeframesCore(symbol string, timeframes []string, primaryTimeframe string, count int) (*Data, error) {
 	symbol = Normalize(symbol)
 
 	if len(timeframes) == 0 {
@@ -270,47 +291,9 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		timeframes = append([]string{primaryTimeframe}, timeframes...)
 	}
 
-	// Store data for all timeframes
-	timeframeData := make(map[string]*TimeframeSeriesData)
-	var primaryKlines []Kline
-
-	// Check if this is an xyz dex asset (use Hyperliquid API)
-	isXyzAsset := IsXyzDexAsset(symbol)
-
-	// Get K-line data for each timeframe
-	for _, tf := range timeframes {
-		var klines []Kline
-		var err error
-
-		if isXyzAsset {
-			// Use Hyperliquid API for xyz dex assets
-			klines, err = getKlinesFromHyperliquid(symbol, tf, 200)
-			if err != nil {
-				logger.Infof("⚠️ Failed to get %s %s K-line from Hyperliquid: %v", symbol, tf, err)
-				continue
-			}
-		} else {
-			// Use CoinAnk for regular crypto assets
-			klines, err = getKlinesFromCoinAnk(symbol, tf, 200)
-			if err != nil {
-				logger.Infof("⚠️ Failed to get %s %s K-line from CoinAnk: %v", symbol, tf, err)
-				continue
-			}
-		}
-
-		if len(klines) == 0 {
-			logger.Infof("⚠️ %s %s K-line data is empty", symbol, tf)
-			continue
-		}
-
-		// Save primary timeframe K-lines for calculating base indicators
-		if tf == primaryTimeframe {
-			primaryKlines = klines
-		}
-
-		// Calculate series data for this timeframe (use count from config)
-		seriesData := calculateTimeframeSeries(klines, tf, count)
-		timeframeData[tf] = seriesData
+	timeframeData, primaryKlines, err := fetchTimeframeSeriesData(symbol, timeframes, primaryTimeframe, count)
+	if err != nil {
+		return nil, err
 	}
 
 	// If primary timeframe data is empty, return error
@@ -331,7 +314,7 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	currentRSI7 := calculateRSI(primaryKlines, 7)
 
 	// Calculate price changes
-	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60) // 1 hour
+	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60)  // 1 hour
 	priceChange4h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 240) // 4 hours
 
 	// Get OI data
@@ -355,6 +338,241 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		FundingRate:   fundingRate,
 		TimeframeData: timeframeData,
 	}, nil
+}
+
+func getWithTimeframesBinanceWS(symbol string, timeframes []string, primaryTimeframe string, count int) (*Data, error) {
+	symbol = Normalize(symbol)
+	if len(timeframes) == 0 {
+		return nil, fmt.Errorf("at least one timeframe is required")
+	}
+	if primaryTimeframe == "" {
+		primaryTimeframe = timeframes[0]
+	}
+	containsPrimary := false
+	for _, tf := range timeframes {
+		if tf == primaryTimeframe {
+			containsPrimary = true
+			break
+		}
+	}
+	if !containsPrimary {
+		timeframes = append([]string{primaryTimeframe}, timeframes...)
+	}
+	if err := EnsureBinanceWSSubscriptions([]string{symbol}, timeframes); err != nil {
+		logger.Infof("⚠️ Failed to ensure Binance WS market subscription for %s: %v", symbol, err)
+	}
+
+	timeframeData, primaryKlines, err := fetchTimeframeSeriesData(symbol, timeframes, primaryTimeframe, count)
+	if err != nil {
+		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe, fmt.Errorf("failed to fetch base timeframe series: %w", err))
+	}
+	if len(primaryKlines) == 0 {
+		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe, fmt.Errorf("Primary timeframe %s K-line data is empty", primaryTimeframe))
+	}
+	if isStaleData(primaryKlines, symbol) {
+		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe, fmt.Errorf("%s data is stale, possible cache failure", symbol))
+	}
+
+	currentPrice := primaryKlines[len(primaryKlines)-1].Close
+	currentEMA20 := calculateEMA(primaryKlines, 20)
+	currentMACD := calculateMACD(primaryKlines)
+	currentRSI7 := calculateRSI(primaryKlines, 7)
+	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60)
+	priceChange4h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 240)
+
+	oiData, oiErr := getOpenInterestData(symbol)
+	if oiErr != nil {
+		oiData = &OIData{Latest: 0, Average: 0}
+	}
+
+	liveKline := make(map[string]*KlineBar)
+	freshness := make(map[string]int64)
+	overallStale := false
+	var fundingRate float64
+	hasRealtimePrice := false
+	hasRealtimeFunding := false
+
+	primarySnap, hasPrimarySnap := globalBinanceWSFeed.GetSnapshot(symbol, primaryTimeframe)
+	if hasPrimarySnap {
+		if primarySnap.HasMarkPrice && primarySnap.MarkPrice > 0 {
+			currentPrice = primarySnap.MarkPrice
+			hasRealtimePrice = true
+		}
+		if primarySnap.HasFundingRate {
+			fundingRate = primarySnap.FundingRate
+			hasRealtimeFunding = true
+		}
+		if !primarySnap.UpdatedAt.IsZero() {
+			freshness["mark_price"] = primarySnap.UpdatedAt.UnixMilli()
+			freshness["funding_rate"] = primarySnap.UpdatedAt.UnixMilli()
+		}
+		if primarySnap.Stale {
+			overallStale = true
+		}
+	}
+
+	for _, tf := range timeframes {
+		snap, ok := globalBinanceWSFeed.GetSnapshot(symbol, tf)
+		if !ok {
+			continue
+		}
+		if snap.LiveBar != nil {
+			live := *snap.LiveBar
+			liveKline[tf] = &live
+			freshness["live_kline_"+tf] = snap.LiveBar.Time
+		}
+		if !snap.UpdatedAt.IsZero() {
+			freshness["snapshot_"+tf] = snap.UpdatedAt.UnixMilli()
+		}
+		if snap.Stale {
+			overallStale = true
+		}
+	}
+
+	// Strict WS realtime mode for Binance prompt path:
+	// no REST fallback for current price / funding in this branch.
+	if !hasRealtimePrice || !hasRealtimeFunding {
+		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe,
+			fmt.Errorf("binance ws realtime data unavailable (price=%v funding=%v)", hasRealtimePrice, hasRealtimeFunding))
+	}
+
+	data := &Data{
+		Symbol:        symbol,
+		CurrentPrice:  currentPrice,
+		PriceChange1h: priceChange1h,
+		PriceChange4h: priceChange4h,
+		CurrentEMA20:  currentEMA20,
+		CurrentMACD:   currentMACD,
+		CurrentRSI7:   currentRSI7,
+		OpenInterest:  oiData,
+		FundingRate:   fundingRate,
+		TimeframeData: timeframeData,
+		LiveKline:     liveKline,
+		DataFreshness: freshness,
+		IsStale:       overallStale,
+		MarketSource:  "binance_ws",
+	}
+	cacheBinancePromptData(symbol, timeframes, primaryTimeframe, data)
+	return data, nil
+}
+
+func fetchTimeframeSeriesData(symbol string, timeframes []string, primaryTimeframe string, count int) (map[string]*TimeframeSeriesData, []Kline, error) {
+	timeframeData := make(map[string]*TimeframeSeriesData)
+	var primaryKlines []Kline
+
+	isXyzAsset := IsXyzDexAsset(symbol)
+	for _, tf := range timeframes {
+		var klines []Kline
+		var err error
+
+		if isXyzAsset {
+			klines, err = getKlinesFromHyperliquid(symbol, tf, 200)
+			if err != nil {
+				logger.Infof("⚠️ Failed to get %s %s K-line from Hyperliquid: %v", symbol, tf, err)
+				continue
+			}
+		} else {
+			klines, err = getKlinesFromCoinAnk(symbol, tf, 200)
+			if err != nil {
+				logger.Infof("⚠️ Failed to get %s %s K-line from CoinAnk: %v", symbol, tf, err)
+				continue
+			}
+		}
+
+		if len(klines) == 0 {
+			logger.Infof("⚠️ %s %s K-line data is empty", symbol, tf)
+			continue
+		}
+		if tf == primaryTimeframe {
+			primaryKlines = klines
+		}
+		timeframeData[tf] = calculateTimeframeSeries(klines, tf, count)
+	}
+
+	if len(primaryKlines) == 0 {
+		return nil, nil, fmt.Errorf("Primary timeframe %s K-line data is empty", primaryTimeframe)
+	}
+	return timeframeData, primaryKlines, nil
+}
+
+func buildBinancePromptCacheKey(symbol string, timeframes []string, primaryTimeframe string) string {
+	cp := append([]string(nil), timeframes...)
+	sort.Strings(cp)
+	return fmt.Sprintf("%s|%s|%s", symbol, primaryTimeframe, strings.Join(cp, ","))
+}
+
+func cacheBinancePromptData(symbol string, timeframes []string, primaryTimeframe string, data *Data) {
+	key := buildBinancePromptCacheKey(symbol, timeframes, primaryTimeframe)
+	binancePromptDataCache.Store(key, &cachedMarketData{
+		Data:      cloneMarketData(data),
+		UpdatedAt: time.Now().UTC(),
+	})
+}
+
+func getCachedBinancePromptData(symbol string, timeframes []string, primaryTimeframe string, cause error) (*Data, error) {
+	key := buildBinancePromptCacheKey(symbol, timeframes, primaryTimeframe)
+	if v, ok := binancePromptDataCache.Load(key); ok {
+		if c, ok2 := v.(*cachedMarketData); ok2 && c != nil && c.Data != nil {
+			data := cloneMarketData(c.Data)
+			data.IsStale = true
+			if data.DataFreshness == nil {
+				data.DataFreshness = make(map[string]int64)
+			}
+			data.DataFreshness["cache_updated_at"] = c.UpdatedAt.UnixMilli()
+			logger.Infof("⚠️ Binance WS stale fallback for %s (cache age=%s): %v", symbol, time.Since(c.UpdatedAt).Round(time.Second), cause)
+			return data, nil
+		}
+	}
+	return nil, cause
+}
+
+func cloneMarketData(src *Data) *Data {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	if src.OpenInterest != nil {
+		oi := *src.OpenInterest
+		dst.OpenInterest = &oi
+	}
+	if len(src.TimeframeData) > 0 {
+		dst.TimeframeData = make(map[string]*TimeframeSeriesData, len(src.TimeframeData))
+		for tf, tfData := range src.TimeframeData {
+			if tfData == nil {
+				continue
+			}
+			cp := *tfData
+			cp.Klines = append([]KlineBar(nil), tfData.Klines...)
+			cp.MidPrices = append([]float64(nil), tfData.MidPrices...)
+			cp.EMA20Values = append([]float64(nil), tfData.EMA20Values...)
+			cp.EMA50Values = append([]float64(nil), tfData.EMA50Values...)
+			cp.MACDValues = append([]float64(nil), tfData.MACDValues...)
+			cp.RSI7Values = append([]float64(nil), tfData.RSI7Values...)
+			cp.RSI14Values = append([]float64(nil), tfData.RSI14Values...)
+			cp.Volume = append([]float64(nil), tfData.Volume...)
+			cp.BOLLUpper = append([]float64(nil), tfData.BOLLUpper...)
+			cp.BOLLMiddle = append([]float64(nil), tfData.BOLLMiddle...)
+			cp.BOLLLower = append([]float64(nil), tfData.BOLLLower...)
+			dst.TimeframeData[tf] = &cp
+		}
+	}
+	if len(src.LiveKline) > 0 {
+		dst.LiveKline = make(map[string]*KlineBar, len(src.LiveKline))
+		for tf, bar := range src.LiveKline {
+			if bar == nil {
+				continue
+			}
+			cp := *bar
+			dst.LiveKline[tf] = &cp
+		}
+	}
+	if len(src.DataFreshness) > 0 {
+		dst.DataFreshness = make(map[string]int64, len(src.DataFreshness))
+		for k, v := range src.DataFreshness {
+			dst.DataFreshness[k] = v
+		}
+	}
+	return &dst
 }
 
 // calculateTimeframeSeries calculates series data for a single timeframe

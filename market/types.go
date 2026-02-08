@@ -15,6 +15,10 @@ type Data struct {
 	FundingRate       float64
 	IntradaySeries    *IntradayData
 	LongerTermContext *LongerTermData
+	LiveKline         map[string]*KlineBar `json:"live_kline,omitempty"`     // realtime in-progress bars by timeframe
+	DataFreshness     map[string]int64     `json:"data_freshness,omitempty"` // freshness timestamps in milliseconds
+	IsStale           bool                 `json:"is_stale,omitempty"`       // true when realtime source is stale
+	MarketSource      string               `json:"market_source,omitempty"`  // e.g. "binance_ws"
 	// Multi-timeframe data (new)
 	TimeframeData map[string]*TimeframeSeriesData `json:"timeframe_data,omitempty"`
 }
