@@ -105,6 +105,10 @@ func (t *FuturesTrader) handleUserStreamEvent(event *futures.WsUserDataEvent) {
 	switch event.Event {
 	case futures.UserDataEventTypeAccountUpdate:
 		t.updateFromAccountUpdate(event.WsUserDataAccountUpdate.AccountUpdate)
+	case futures.UserDataEventTypeOrderTradeUpdate:
+		t.updateFromOrderTradeUpdate(event.WsUserDataOrderTradeUpdate.OrderTradeUpdate)
+	case futures.UserDataEventTypeAlgoUpdate:
+		t.updateFromAlgoUpdate(event.WsUserDataAlgoUpdate.AlgoUpdate)
 	}
 }
 
@@ -155,6 +159,68 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 	t.cachedPositions = positions
 	t.positionsCacheTime = time.Now()
 	t.positionsCacheMutex.Unlock()
+}
+
+func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUpdate) {
+	orderID := strconv.FormatInt(update.ID, 10)
+	order := OpenOrder{
+		OrderID:      orderID,
+		Symbol:       update.Symbol,
+		Side:         string(update.Side),
+		PositionSide: string(update.PositionSide),
+		Type:         string(update.Type),
+		Price:        parseFloatWS(update.OriginalPrice),
+		StopPrice:    parseFloatWS(update.StopPrice),
+		Quantity:     parseFloatWS(update.OriginalQty),
+		Status:       string(update.Status),
+	}
+
+	t.openOrdersMu.Lock()
+	if isTerminalOrderStatus(order.Status) {
+		delete(t.openOrders, order.OrderID)
+	} else {
+		t.openOrders[order.OrderID] = order
+	}
+	t.openOrdersCache = time.Now()
+	t.openOrdersMu.Unlock()
+
+	if strings.ToUpper(string(update.ExecutionType)) != "TRADE" || update.TradeID <= 0 {
+		return
+	}
+	trade := TradeRecord{
+		TradeID:      strconv.FormatInt(update.TradeID, 10),
+		Symbol:       update.Symbol,
+		Side:         string(update.Side),
+		PositionSide: string(update.PositionSide),
+		Price:        parseFloatWS(update.LastFilledPrice),
+		Quantity:     parseFloatWS(update.LastFilledQty),
+		RealizedPnL:  parseFloatWS(update.RealizedPnL),
+		Fee:          parseFloatWS(update.Commission),
+		Time:         time.UnixMilli(update.TradeTime).UTC(),
+	}
+	t.appendWsTrade(trade)
+}
+
+func (t *FuturesTrader) updateFromAlgoUpdate(update futures.WsAlgoUpdate) {
+	order := OpenOrder{
+		OrderID:      update.OrderID,
+		Symbol:       update.Symbol,
+		Side:         string(update.Side),
+		PositionSide: string(update.PositionSide),
+		Type:         string(update.OrderType),
+		Price:        parseFloatWS(update.OrderPrice),
+		StopPrice:    parseFloatWS(update.TriggerPrice),
+		Quantity:     parseFloatWS(update.Quantity),
+		Status:       update.AlgoStatus,
+	}
+	t.openOrdersMu.Lock()
+	if isTerminalOrderStatus(order.Status) {
+		delete(t.openOrders, order.OrderID)
+	} else {
+		t.openOrders[order.OrderID] = order
+	}
+	t.openOrdersCache = time.Now()
+	t.openOrdersMu.Unlock()
 }
 
 func extractFuturesBalances(balances []futures.WsBalance) (walletBalance, availableBalance float64) {
@@ -216,4 +282,47 @@ func isRateLimitError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Too many requests") || strings.Contains(msg, "-1003")
+}
+
+func isTerminalOrderStatus(status string) bool {
+	s := strings.ToUpper(strings.TrimSpace(status))
+	return s == "FILLED" || s == "CANCELED" || s == "CANCELLED" || s == "EXPIRED" || s == "REJECTED"
+}
+
+func (t *FuturesTrader) appendWsTrade(trade TradeRecord) {
+	if trade.TradeID == "" || trade.Symbol == "" {
+		return
+	}
+	key := trade.Symbol + ":" + trade.TradeID
+	t.wsTradesMu.Lock()
+	if _, exists := t.wsTradeSeen[key]; exists {
+		t.wsTradesMu.Unlock()
+		return
+	}
+	t.wsTradeSeen[key] = struct{}{}
+	t.wsTrades = append(t.wsTrades, trade)
+	if len(t.wsTrades) > t.wsTradesMaxSize {
+		drop := len(t.wsTrades) - t.wsTradesMaxSize
+		for i := 0; i < drop; i++ {
+			old := t.wsTrades[i]
+			delete(t.wsTradeSeen, old.Symbol+":"+old.TradeID)
+		}
+		t.wsTrades = t.wsTrades[drop:]
+	}
+	t.wsTradesMu.Unlock()
+}
+
+func (t *FuturesTrader) getWsTradesSince(tsMs int64) []TradeRecord {
+	t.wsTradesMu.RLock()
+	defer t.wsTradesMu.RUnlock()
+	if len(t.wsTrades) == 0 {
+		return nil
+	}
+	out := make([]TradeRecord, 0, len(t.wsTrades))
+	for _, tr := range t.wsTrades {
+		if tr.Time.UnixMilli() >= tsMs {
+			out = append(out, tr)
+		}
+	}
+	return out
 }

@@ -50,6 +50,8 @@ type FuturesTrader struct {
 	spotClient        *binance.Client
 	isTestnet         bool
 	userStreamEnabled bool
+	strictWSOnly      bool
+	wsGateway         *binanceWsReadGateway
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -68,6 +70,17 @@ type FuturesTrader struct {
 	userStreamMu        sync.RWMutex
 	userStreamActive    bool
 	userStreamLastEvent time.Time
+
+	// Open order cache populated from user stream events
+	openOrders      map[string]OpenOrder
+	openOrdersMu    sync.RWMutex
+	openOrdersCache time.Time
+
+	// Trade event buffer for WS incremental sync
+	wsTrades        []TradeRecord
+	wsTradeSeen     map[string]struct{}
+	wsTradesMu      sync.RWMutex
+	wsTradesMaxSize int
 }
 
 // NewFuturesTrader creates futures trader
@@ -93,6 +106,11 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		cacheDuration:     15 * time.Second, // 15-second cache
 		isTestnet:         testnet,
 		userStreamEnabled: !testnet,
+		strictWSOnly:      true,
+		wsGateway:         newBinanceWsReadGateway(client, spotClient, testnet),
+		openOrders:        make(map[string]OpenOrder),
+		wsTradeSeen:       make(map[string]struct{}),
+		wsTradesMaxSize:   4000,
 	}
 
 	// Set dual-side position mode (Hedge Mode)
@@ -162,6 +180,43 @@ func syncBinanceServerTimeSpot(client *binance.Client) {
 
 // GetBalance gets account balance (with cache)
 func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
+	if t.strictWSOnly {
+		// Prefer stream-updated cache first.
+		t.balanceCacheMutex.RLock()
+		if t.cachedBalance != nil && time.Since(t.balanceCacheTime) < 5*time.Minute {
+			cached := t.cachedBalance
+			t.balanceCacheMutex.RUnlock()
+			return cached, nil
+		}
+		t.balanceCacheMutex.RUnlock()
+
+		if t.wsGateway == nil {
+			return nil, fmt.Errorf("binance ws gateway not initialized")
+		}
+		snap, err := t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+		if err != nil {
+			t.balanceCacheMutex.RLock()
+			if t.cachedBalance != nil && time.Since(t.balanceCacheTime) < 15*time.Minute {
+				cached := t.cachedBalance
+				t.balanceCacheMutex.RUnlock()
+				logger.Infof("⚠️ Binance WS balance query failed, returning stale cached balance: %v", err)
+				return cached, nil
+			}
+			t.balanceCacheMutex.RUnlock()
+			return nil, fmt.Errorf("failed to get account info via websocket: %w", err)
+		}
+		result := map[string]interface{}{
+			"totalWalletBalance":    snap.TotalWalletBalance,
+			"availableBalance":      snap.AvailableBalance,
+			"totalUnrealizedProfit": snap.TotalUnrealizedProfit,
+		}
+		t.balanceCacheMutex.Lock()
+		t.cachedBalance = result
+		t.balanceCacheTime = time.Now()
+		t.balanceCacheMutex.Unlock()
+		return result, nil
+	}
+
 	// First check if cache is valid
 	t.balanceCacheMutex.RLock()
 	if t.cachedBalance != nil && (t.isUserStreamFresh() || time.Since(t.balanceCacheTime) < t.cacheDuration) {
@@ -236,6 +291,13 @@ func (t *FuturesTrader) GetFuturesAvailableBalanceUSDT() (float64, error) {
 
 // GetSpotUSDTBalance returns available USDT balance in spot account.
 func (t *FuturesTrader) GetSpotUSDTBalance() (float64, error) {
+	if t.strictWSOnly {
+		if t.wsGateway == nil {
+			return 0, fmt.Errorf("binance ws gateway not initialized")
+		}
+		return t.wsGateway.getSpotUSDTBalance(BinanceWsReadOptions{Timeout: 5 * time.Second})
+	}
+
 	if t.isTestnet {
 		return 0, fmt.Errorf("spot balance not supported in Binance testnet mode")
 	}
@@ -290,6 +352,54 @@ func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, a
 
 // GetPositions gets all positions (with cache)
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
+	if t.strictWSOnly {
+		t.positionsCacheMutex.RLock()
+		if t.cachedPositions != nil && time.Since(t.positionsCacheTime) < 5*time.Minute {
+			cached := t.cachedPositions
+			t.positionsCacheMutex.RUnlock()
+			return cached, nil
+		}
+		t.positionsCacheMutex.RUnlock()
+
+		if t.wsGateway == nil {
+			return nil, fmt.Errorf("binance ws gateway not initialized")
+		}
+		snap, err := t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+		if err != nil {
+			t.positionsCacheMutex.RLock()
+			if t.cachedPositions != nil && time.Since(t.positionsCacheTime) < 15*time.Minute {
+				cached := t.cachedPositions
+				t.positionsCacheMutex.RUnlock()
+				logger.Infof("⚠️ Binance WS positions query failed, returning stale cached positions: %v", err)
+				return cached, nil
+			}
+			t.positionsCacheMutex.RUnlock()
+			return nil, fmt.Errorf("failed to get positions via websocket: %w", err)
+		}
+
+		var result []map[string]interface{}
+		for _, p := range snap.Positions {
+			if p.PositionAmt == 0 {
+				continue
+			}
+			result = append(result, map[string]interface{}{
+				"symbol":           p.Symbol,
+				"positionAmt":      p.PositionAmt,
+				"entryPrice":       p.EntryPrice,
+				"markPrice":        p.MarkPrice,
+				"unRealizedProfit": p.UnRealizedProfit,
+				"leverage":         p.Leverage,
+				"liquidationPrice": p.LiquidationPrice,
+				"side":             p.Side,
+			})
+		}
+		t.positionsCacheMutex.Lock()
+		t.cachedPositions = result
+		t.positionsCacheTime = time.Now()
+		t.positionsCacheMutex.Unlock()
+		return result, nil
+	}
+
 	// First check if cache is valid
 	t.positionsCacheMutex.RLock()
 	if t.cachedPositions != nil && (t.isUserStreamFresh() || time.Since(t.positionsCacheTime) < t.cacheDuration) {
@@ -954,6 +1064,13 @@ func (t *FuturesTrader) CancelOrder(symbol, orderID string) error {
 // GetOrderBook gets the order book for a symbol
 // This implements the GridTrader interface for FuturesTrader
 func (t *FuturesTrader) GetOrderBook(symbol string, depth int) (bids, asks [][]float64, err error) {
+	if t.strictWSOnly {
+		if t.wsGateway == nil {
+			return nil, nil, fmt.Errorf("binance ws gateway not initialized")
+		}
+		return t.wsGateway.getOrderBook(symbol, depth, depth, 5*time.Second)
+	}
+
 	book, err := t.client.NewDepthService().
 		Symbol(symbol).
 		Limit(depth).
@@ -1044,6 +1161,22 @@ func (t *FuturesTrader) CancelStopOrders(symbol string) error {
 
 // GetOpenOrders gets all open/pending orders for a symbol
 func (t *FuturesTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
+	if t.strictWSOnly {
+		t.openOrdersMu.RLock()
+		defer t.openOrdersMu.RUnlock()
+		result := make([]OpenOrder, 0, len(t.openOrders))
+		for _, ord := range t.openOrders {
+			if symbol != "" && !strings.EqualFold(ord.Symbol, symbol) {
+				continue
+			}
+			if isTerminalOrderStatus(ord.Status) {
+				continue
+			}
+			result = append(result, ord)
+		}
+		return result, nil
+	}
+
 	var result []OpenOrder
 
 	// 1. Get legacy open orders
@@ -1102,6 +1235,10 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 
 // GetOpenOrdersAll gets all open/pending orders for the account
 func (t *FuturesTrader) GetOpenOrdersAll() ([]OpenOrder, error) {
+	if t.strictWSOnly {
+		return t.GetOpenOrders("")
+	}
+
 	var result []OpenOrder
 
 	orders, err := t.client.NewListOpenOrdersService().Do(context.Background())
@@ -1154,6 +1291,13 @@ func (t *FuturesTrader) GetOpenOrdersAll() ([]OpenOrder, error) {
 
 // GetMarketPrice gets market price
 func (t *FuturesTrader) GetMarketPrice(symbol string) (float64, error) {
+	if t.strictWSOnly {
+		if t.wsGateway == nil {
+			return 0, fmt.Errorf("binance ws gateway not initialized")
+		}
+		return t.wsGateway.getMarketPrice(symbol, 5*time.Second)
+	}
+
 	prices, err := t.client.NewListPricesService().Symbol(symbol).Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get price: %w", err)
@@ -1249,6 +1393,11 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 
 // GetMinNotional gets minimum notional value (Binance requirement)
 func (t *FuturesTrader) GetMinNotional(symbol string) float64 {
+	if t.strictWSOnly && t.wsGateway != nil {
+		if meta, err := t.wsGateway.getSymbolMeta(symbol, 5*time.Second); err == nil && meta.MinNotional > 0 {
+			return meta.MinNotional
+		}
+	}
 	// Use conservative default value of 10 USDT to ensure order passes exchange validation
 	return 10.0
 }
@@ -1275,6 +1424,17 @@ func (t *FuturesTrader) CheckMinNotional(symbol string, quantity float64) error 
 
 // GetSymbolPrecision gets the quantity precision for a trading pair
 func (t *FuturesTrader) GetSymbolPrecision(symbol string) (int, error) {
+	if t.strictWSOnly {
+		if t.wsGateway == nil {
+			return 0, fmt.Errorf("binance ws gateway not initialized")
+		}
+		meta, err := t.wsGateway.getSymbolMeta(symbol, 5*time.Second)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get symbol precision via websocket: %w", err)
+		}
+		return meta.QtyPrecision, nil
+	}
+
 	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get trading rules: %w", err)
@@ -1355,6 +1515,17 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 
 // GetSymbolPricePrecision gets the price precision for a trading pair
 func (t *FuturesTrader) GetSymbolPricePrecision(symbol string) (int, error) {
+	if t.strictWSOnly {
+		if t.wsGateway == nil {
+			return 0, fmt.Errorf("binance ws gateway not initialized")
+		}
+		meta, err := t.wsGateway.getSymbolMeta(symbol, 5*time.Second)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get symbol price precision via websocket: %w", err)
+		}
+		return meta.PricePrecision, nil
+	}
+
 	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
 	if err != nil {
 		return 0, fmt.Errorf("failed to get trading rules: %w", err)
@@ -1405,6 +1576,17 @@ func stringContains(s, substr string) bool {
 
 // GetOrderStatus gets order status
 func (t *FuturesTrader) GetOrderStatus(symbol string, orderID string) (map[string]interface{}, error) {
+	if t.strictWSOnly {
+		if t.wsGateway == nil {
+			return nil, fmt.Errorf("binance ws gateway not initialized")
+		}
+		orderIDInt, err := strconv.ParseInt(orderID, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid order ID: %s", orderID)
+		}
+		return t.wsGateway.getOrderStatus(symbol, orderIDInt, 5*time.Second)
+	}
+
 	// Convert orderID to int64
 	orderIDInt, err := strconv.ParseInt(orderID, 10, 64)
 	if err != nil {
@@ -1504,6 +1686,10 @@ func (t *FuturesTrader) GetClosedPnL(startTime time.Time, limit int) ([]ClosedPn
 // GetTrades retrieves trade history from Binance Futures using Income API
 // Note: Income API has delays (~minutes), for real-time use GetTradesForSymbol instead
 func (t *FuturesTrader) GetTrades(startTime time.Time, limit int) ([]TradeRecord, error) {
+	if t.strictWSOnly {
+		return nil, fmt.Errorf("historical trades via REST disabled in strict websocket mode")
+	}
+
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1547,6 +1733,10 @@ func (t *FuturesTrader) GetTrades(startTime time.Time, limit int) ([]TradeRecord
 // GetTradesForSymbol retrieves trade history for a specific symbol
 // This is more reliable than using Income API which may have delays
 func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, limit int) ([]TradeRecord, error) {
+	if t.strictWSOnly {
+		return nil, fmt.Errorf("historical symbol trades via REST disabled in strict websocket mode")
+	}
+
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1590,6 +1780,10 @@ func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, l
 // GetTradesForSymbolFromID retrieves trade history for a specific symbol starting from a given trade ID
 // This is used for incremental sync - only fetch new trades since last sync
 func (t *FuturesTrader) GetTradesForSymbolFromID(symbol string, fromID int64, limit int) ([]TradeRecord, error) {
+	if t.strictWSOnly {
+		return nil, fmt.Errorf("incremental trade history via REST disabled in strict websocket mode")
+	}
+
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1633,6 +1827,10 @@ func (t *FuturesTrader) GetTradesForSymbolFromID(symbol string, fromID int64, li
 // GetCommissionSymbols returns symbols that have new commission records since lastSyncTime
 // COMMISSION income is generated for every trade, so this is more reliable than REALIZED_PNL
 func (t *FuturesTrader) GetCommissionSymbols(lastSyncTime time.Time) ([]string, error) {
+	if t.strictWSOnly {
+		return nil, fmt.Errorf("commission history via REST disabled in strict websocket mode")
+	}
+
 	incomes, err := t.client.NewGetIncomeHistoryService().
 		IncomeType("COMMISSION").
 		StartTime(lastSyncTime.UnixMilli()).
@@ -1660,6 +1858,10 @@ func (t *FuturesTrader) GetCommissionSymbols(lastSyncTime time.Time) ([]string, 
 // GetPnLSymbols returns symbols that have REALIZED_PNL records since lastSyncTime
 // This is a fallback when COMMISSION detection fails (VIP users, BNB fee discount)
 func (t *FuturesTrader) GetPnLSymbols(lastSyncTime time.Time) ([]string, error) {
+	if t.strictWSOnly {
+		return nil, fmt.Errorf("pnl history via REST disabled in strict websocket mode")
+	}
+
 	incomes, err := t.client.NewGetIncomeHistoryService().
 		IncomeType("REALIZED_PNL").
 		StartTime(lastSyncTime.UnixMilli()).
