@@ -361,10 +361,17 @@ func getWithTimeframesBinanceWS(symbol string, timeframes []string, primaryTimef
 	if err := EnsureBinanceWSSubscriptions([]string{symbol}, timeframes); err != nil {
 		logger.Infof("⚠️ Failed to ensure Binance WS market subscription for %s: %v", symbol, err)
 	}
+	waitForBinancePrimaryRealtime(symbol, primaryTimeframe, 3*time.Second)
 
 	timeframeData, primaryKlines, err := fetchTimeframeSeriesData(symbol, timeframes, primaryTimeframe, count)
 	if err != nil {
-		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe, fmt.Errorf("failed to fetch base timeframe series: %w", err))
+		// WS fallback for startup/reconnect windows: try to build minimal series from WS snapshots.
+		var wsErr error
+		timeframeData, primaryKlines, wsErr = buildSeriesFromWSSnapshots(symbol, timeframes, primaryTimeframe, count)
+		if wsErr != nil {
+			return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe, fmt.Errorf("failed to fetch base timeframe series: %w", err))
+		}
+		logger.Infof("⚠️ Using Binance WS-only minimal series for %s due to base series fetch error: %v", symbol, err)
 	}
 	if len(primaryKlines) == 0 {
 		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe, fmt.Errorf("Primary timeframe %s K-line data is empty", primaryTimeframe))
@@ -430,10 +437,21 @@ func getWithTimeframesBinanceWS(symbol string, timeframes []string, primaryTimef
 	}
 
 	// Strict WS realtime mode for Binance prompt path:
-	// no REST fallback for current price / funding in this branch.
-	if !hasRealtimePrice || !hasRealtimeFunding {
+	// current price must be WS realtime; funding can use recent in-process cache if WS event is lagging.
+	if !hasRealtimePrice {
 		return getCachedBinancePromptData(symbol, timeframes, primaryTimeframe,
-			fmt.Errorf("binance ws realtime data unavailable (price=%v funding=%v)", hasRealtimePrice, hasRealtimeFunding))
+			fmt.Errorf("binance ws realtime price unavailable"))
+	}
+	if !hasRealtimeFunding {
+		if cachedFunding, ok := getCachedFundingRate(symbol, timeframes, primaryTimeframe); ok {
+			fundingRate = cachedFunding
+			overallStale = true
+			freshness["funding_rate_cache_fallback"] = time.Now().UTC().UnixMilli()
+			logger.Infof("⚠️ Binance WS funding not ready for %s, using cached funding fallback", symbol)
+		} else {
+			overallStale = true
+			freshness["funding_rate_missing"] = time.Now().UTC().UnixMilli()
+		}
 	}
 
 	data := &Data{
@@ -454,6 +472,62 @@ func getWithTimeframesBinanceWS(symbol string, timeframes []string, primaryTimef
 	}
 	cacheBinancePromptData(symbol, timeframes, primaryTimeframe, data)
 	return data, nil
+}
+
+func waitForBinancePrimaryRealtime(symbol, timeframe string, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		snap, ok := globalBinanceWSFeed.GetSnapshot(symbol, timeframe)
+		if ok && snap != nil && snap.HasMarkPrice && snap.MarkPrice > 0 {
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+func buildSeriesFromWSSnapshots(symbol string, timeframes []string, primaryTimeframe string, count int) (map[string]*TimeframeSeriesData, []Kline, error) {
+	if count <= 0 {
+		count = 30
+	}
+	timeframeData := make(map[string]*TimeframeSeriesData)
+	var primaryKlines []Kline
+
+	for _, tf := range timeframes {
+		snap, ok := globalBinanceWSFeed.GetSnapshot(symbol, tf)
+		if !ok || snap == nil {
+			continue
+		}
+
+		klines := append([]Kline(nil), snap.BarsClosed...)
+		// If no closed bars yet, keep one synthetic bar from live kline for startup continuity.
+		if len(klines) == 0 && snap.LiveBar != nil {
+			klines = append(klines, Kline{
+				OpenTime:  snap.LiveBar.Time,
+				Open:      snap.LiveBar.Open,
+				High:      snap.LiveBar.High,
+				Low:       snap.LiveBar.Low,
+				Close:     snap.LiveBar.Close,
+				Volume:    snap.LiveBar.Volume,
+				CloseTime: snap.LiveBar.Time,
+			})
+		}
+		if len(klines) == 0 {
+			continue
+		}
+
+		if tf == primaryTimeframe {
+			primaryKlines = append(primaryKlines, klines...)
+		}
+		timeframeData[tf] = calculateTimeframeSeries(klines, tf, count)
+	}
+
+	if len(primaryKlines) == 0 {
+		return nil, nil, fmt.Errorf("ws primary timeframe %s not ready", primaryTimeframe)
+	}
+	return timeframeData, primaryKlines, nil
 }
 
 func fetchTimeframeSeriesData(symbol string, timeframes []string, primaryTimeframe string, count int) (map[string]*TimeframeSeriesData, []Kline, error) {
@@ -507,6 +581,18 @@ func cacheBinancePromptData(symbol string, timeframes []string, primaryTimeframe
 		Data:      cloneMarketData(data),
 		UpdatedAt: time.Now().UTC(),
 	})
+}
+
+func getCachedFundingRate(symbol string, timeframes []string, primaryTimeframe string) (float64, bool) {
+	key := buildBinancePromptCacheKey(symbol, timeframes, primaryTimeframe)
+	if v, ok := binancePromptDataCache.Load(key); ok {
+		if c, ok2 := v.(*cachedMarketData); ok2 && c != nil && c.Data != nil {
+			if c.Data.FundingRate != 0 {
+				return c.Data.FundingRate, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func getCachedBinancePromptData(symbol string, timeframes []string, primaryTimeframe string, cause error) (*Data, error) {
