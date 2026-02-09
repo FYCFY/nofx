@@ -562,6 +562,9 @@ func (at *AutoTrader) Stop() {
 
 	close(at.stopMonitorCh) // Notify monitoring goroutine to stop
 	at.monitorWg.Wait()     // Wait for monitoring goroutine to finish
+	if stoppable, ok := at.trader.(interface{ Stop() }); ok {
+		stoppable.Stop()
+	}
 	logger.Info("⏹ Automatic trading system stopped")
 }
 

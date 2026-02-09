@@ -89,6 +89,20 @@ type wsDepthSnapshot struct {
 	asks [][]float64
 }
 
+func (g *binanceWsReadGateway) Stop() {
+	select {
+	case <-g.closed:
+	default:
+		close(g.closed)
+	}
+	if g.futuresConnMgr != nil {
+		g.futuresConnMgr.Stop()
+	}
+	if g.spotConnMgr != nil {
+		g.spotConnMgr.Stop()
+	}
+}
+
 func newBinanceWsReadGateway(futuresClient *futures.Client, spotClient *binance.Client, isTestnet bool) *binanceWsReadGateway {
 	futuresEndpoint := futures.BaseWsApiMainURL
 	if isTestnet {

@@ -344,6 +344,7 @@ func TestNewFuturesTrader(t *testing.T) {
 
 	// Test successful creation
 	trader := NewFuturesTrader("test_api_key", "test_secret_key", "test_user", false)
+	defer trader.Stop()
 
 	// Modify client to use mock server
 	trader.client.BaseURL = mockServer.URL
@@ -355,12 +356,18 @@ func TestNewFuturesTrader(t *testing.T) {
 }
 
 func TestNewFuturesTraderTestnetBaseURL(t *testing.T) {
+	originalUseTestnet := futures.UseTestnet
+	defer func() { futures.UseTestnet = originalUseTestnet }()
 	trader := NewFuturesTrader("test_api_key", "test_secret_key", "test_user", true)
+	defer trader.Stop()
 	if trader.client.BaseURL != "https://demo-fapi.binance.com" {
 		t.Fatalf("expected testnet base URL, got %s", trader.client.BaseURL)
 	}
-	if trader.userStreamEnabled {
-		t.Fatalf("expected user stream disabled in testnet mode")
+	if !trader.userStreamEnabled {
+		t.Fatalf("expected user stream enabled in testnet mode")
+	}
+	if !futures.UseTestnet {
+		t.Fatalf("expected futures.UseTestnet=true in testnet mode")
 	}
 }
 

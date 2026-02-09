@@ -16,6 +16,13 @@ import (
 	"github.com/adshao/go-binance/v2/futures"
 )
 
+var (
+	futuresWsEnvMu          sync.Mutex
+	futuresWsEnvRefCount    int
+	futuresWsEnvOriginalSet bool
+	futuresWsEnvOriginal    bool
+)
+
 // getBrOrderID generates unique order ID (for futures contracts)
 // Format: x-{BR_ID}{TIMESTAMP}{RANDOM}
 // Futures limit is 32 characters, use this limit consistently
@@ -74,6 +81,8 @@ type FuturesTrader struct {
 	positionTruthMu      sync.RWMutex
 	positionTruthStore   map[string]BinancePositionSnapshot
 	positionTruthUpdated time.Time
+	futuresWsEnvAcquired bool
+	stopOnce             sync.Once
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -105,6 +114,28 @@ type FuturesTrader struct {
 	wsTradeSeen     map[string]struct{}
 	wsTradesMu      sync.RWMutex
 	wsTradesMaxSize int
+}
+
+func (t *FuturesTrader) acquireFuturesWsEnv() {
+	futuresWsEnvMu.Lock()
+	defer futuresWsEnvMu.Unlock()
+	if !futuresWsEnvOriginalSet {
+		futuresWsEnvOriginal = futures.UseTestnet
+		futuresWsEnvOriginalSet = true
+	}
+	futuresWsEnvRefCount++
+	futures.UseTestnet = t.isTestnet
+}
+
+func (t *FuturesTrader) releaseFuturesWsEnv() {
+	futuresWsEnvMu.Lock()
+	defer futuresWsEnvMu.Unlock()
+	if futuresWsEnvRefCount > 0 {
+		futuresWsEnvRefCount--
+	}
+	if futuresWsEnvRefCount == 0 && futuresWsEnvOriginalSet {
+		futures.UseTestnet = futuresWsEnvOriginal
+	}
 }
 
 func (t *FuturesTrader) fetchAccountSnapshotWS() (*BinanceAccountSnapshot, error) {
@@ -536,7 +567,7 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		cacheDuration:          15 * time.Second, // 15-second cache
 		realtimeRecalcInterval: 3 * time.Second,
 		isTestnet:              testnet,
-		userStreamEnabled:      !testnet,
+		userStreamEnabled:      true,
 		strictWSOnly:           true,
 		wsGateway:              newBinanceWsReadGateway(client, spotClient, testnet),
 		symbolLeverage:         make(map[string]int),
@@ -553,6 +584,8 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		positionSyncInterval:   45 * time.Second,
 		positionTruthStore:     make(map[string]BinancePositionSnapshot),
 	}
+	trader.acquireFuturesWsEnv()
+	trader.futuresWsEnvAcquired = true
 	trader.realtimeEngine = newBinanceRealtimeAccountEngine(trader.wsGateway, trader.realtimeRecalcInterval)
 	trader.realtimeEngine.SetLeverageLookup(func(symbol string) (float64, bool) {
 		if lev, ok := trader.getSymbolLeverage(symbol); ok {
@@ -573,6 +606,11 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 	} else {
 		logger.Infof("⚠️ Binance user stream disabled (testnet mode)")
 	}
+	env := "mainnet"
+	if trader.isTestnet {
+		env = "testnet"
+	}
+	logger.Infof("🔧 Binance WS mode initialized: binance_env=%s ws_stream_enabled=%v strict_ws_only=%v", env, trader.userStreamEnabled, trader.strictWSOnly)
 	trader.startAccountBaselineSyncLoop()
 	trader.startOrdersBaselineSyncLoop()
 	trader.startPositionTruthSyncLoop()
@@ -630,6 +668,23 @@ func syncBinanceServerTimeSpot(client *binance.Client) {
 	offset := now - serverTime
 	client.TimeOffset = offset
 	logger.Infof("⏱ Binance spot server time synced, offset %dms", offset)
+}
+
+// Stop releases background resources used by WS-only read paths.
+func (t *FuturesTrader) Stop() {
+	t.stopOnce.Do(func() {
+		if t.realtimeEngine != nil {
+			t.realtimeEngine.Stop()
+		}
+		if t.wsGateway != nil {
+			t.wsGateway.Stop()
+		}
+		if t.futuresWsEnvAcquired {
+			t.releaseFuturesWsEnv()
+			t.futuresWsEnvAcquired = false
+		}
+		logger.Infof("⏹ Binance trader stopped (testnet=%v)", t.isTestnet)
+	})
 }
 
 // GetBalance gets account balance (with cache)
