@@ -151,6 +151,15 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 		if trueLev, ok := t.getSymbolLeverage(pos.Symbol); ok {
 			lev = float64(trueLev)
 		}
+		liqPrice := 0.0
+		if truth, ok := t.lookupPositionTruth(pos.Symbol, sideRaw); ok {
+			if truth.LiquidationPrice > 0 {
+				liqPrice = truth.LiquidationPrice
+			}
+			if truth.Leverage > 0 {
+				lev = truth.Leverage
+			}
+		}
 
 		positions = append(positions, map[string]interface{}{
 			"symbol":               pos.Symbol,
@@ -159,7 +168,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			"markPrice":            markPrice,
 			"unRealizedProfit":     unrealized,
 			"leverage":             lev,
-			"liquidationPrice":     0.0,
+			"liquidationPrice":     liqPrice,
 			"side":                 side,
 			"position_data_source": "ws_user_stream",
 		})
@@ -170,7 +179,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			MarkPrice:        markPrice,
 			UnRealizedProfit: unrealized,
 			Leverage:         lev,
-			LiquidationPrice: 0,
+			LiquidationPrice: liqPrice,
 			Side:             side,
 			PositionSideRaw:  sideRaw,
 			DataSource:       "ws_user_stream",

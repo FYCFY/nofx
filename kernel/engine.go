@@ -1435,13 +1435,15 @@ func (e *StrategyEngine) formatPositionInfo(index int, pos PositionInfo, ctx *Co
 		positionValue = -positionValue
 	}
 
-	stopInfo := ""
+	stopLossText := "n/a"
+	takeProfitText := "n/a"
 	if pos.StopLoss > 0 {
-		stopInfo = fmt.Sprintf(" | SL %.4f", pos.StopLoss)
+		stopLossText = fmt.Sprintf("%.4f", pos.StopLoss)
 	}
 	if pos.TakeProfit > 0 {
-		stopInfo += fmt.Sprintf(" | TP %.4f", pos.TakeProfit)
+		takeProfitText = fmt.Sprintf("%.4f", pos.TakeProfit)
 	}
+	stopInfo := fmt.Sprintf(" | SL %s | TP %s", stopLossText, takeProfitText)
 
 	sb.WriteString(fmt.Sprintf("%d. %s %s | Entry %.4f Current %.4f%s | Qty %.4f | Position Value %.2f USDT | PnL%+.2f%% | PnL Amount%+.2f USDT | Peak PnL%.2f%% | Leverage %dx | Margin %.0f | Liq Price %.4f%s\n\n",
 		index, pos.Symbol, strings.ToUpper(pos.Side),

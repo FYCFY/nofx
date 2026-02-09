@@ -53,36 +53,42 @@ func getBrOrderID() string {
 
 // FuturesTrader Binance futures trader
 type FuturesTrader struct {
-	client               *futures.Client
-	spotClient           *binance.Client
-	isTestnet            bool
-	userStreamEnabled    bool
-	strictWSOnly         bool
-	wsGateway            *binanceWsReadGateway
-	realtimeEngine       *BinanceRealtimeAccountEngine
-	symbolLeverage       map[string]int
-	symbolLevSource      map[string]string
-	symbolLeverageMu     sync.RWMutex
-	accountRefreshMu     sync.Mutex
-	accountDirtyMu       sync.Mutex
-	accountDirtyAt       time.Time
-	accountDirtyCh       chan struct{}
-	baselineSyncInterval time.Duration
-	baselineHardStaleAge time.Duration
-	ordersRefreshMu      sync.Mutex
-	ordersDirtyMu        sync.Mutex
-	ordersDirtyAt        time.Time
-	ordersDirtyCh        chan struct{}
-	ordersSyncInterval   time.Duration
-	positionRefreshMu    sync.Mutex
-	positionDirtyAt      time.Time
-	positionDirtyCh      chan struct{}
-	positionSyncInterval time.Duration
-	positionTruthMu      sync.RWMutex
-	positionTruthStore   map[string]BinancePositionSnapshot
-	positionTruthUpdated time.Time
-	futuresWsEnvAcquired bool
-	stopOnce             sync.Once
+	client                *futures.Client
+	spotClient            *binance.Client
+	isTestnet             bool
+	userStreamEnabled     bool
+	strictWSOnly          bool
+	wsGateway             *binanceWsReadGateway
+	realtimeEngine        *BinanceRealtimeAccountEngine
+	symbolLeverage        map[string]int
+	symbolLevSource       map[string]string
+	symbolLeverageMu      sync.RWMutex
+	accountRefreshMu      sync.Mutex
+	accountDirtyMu        sync.Mutex
+	accountDirtyAt        time.Time
+	accountDirtyCh        chan struct{}
+	baselineSyncInterval  time.Duration
+	baselineHardStaleAge  time.Duration
+	ordersRefreshMu       sync.Mutex
+	ordersDirtyMu         sync.Mutex
+	ordersDirtyAt         time.Time
+	ordersDirtyCh         chan struct{}
+	ordersSyncInterval    time.Duration
+	positionRefreshMu     sync.Mutex
+	positionDirtyAt       time.Time
+	positionDirtyCh       chan struct{}
+	positionSyncInterval  time.Duration
+	positionTruthMu       sync.RWMutex
+	positionTruthStore    map[string]BinancePositionSnapshot
+	positionTruthUpdated  time.Time
+	truthHybridMode       bool
+	truthRestSyncMu       sync.Mutex
+	truthRestSyncInterval time.Duration
+	truthRestOnReadMinGap time.Duration
+	lastPositionRestSync  time.Time
+	lastOrdersRestSync    time.Time
+	futuresWsEnvAcquired  bool
+	stopOnce              sync.Once
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -250,6 +256,188 @@ func (t *FuturesTrader) refreshPositionTruthWS(reason string) error {
 	return nil
 }
 
+func (t *FuturesTrader) shouldRunRestTruthSync(kind, reason string) bool {
+	if !t.truthHybridMode {
+		return false
+	}
+	now := time.Now()
+	t.truthRestSyncMu.Lock()
+	defer t.truthRestSyncMu.Unlock()
+
+	var last time.Time
+	switch kind {
+	case "position":
+		last = t.lastPositionRestSync
+	case "orders":
+		last = t.lastOrdersRestSync
+	default:
+		return false
+	}
+
+	minGap := t.truthRestSyncInterval
+	if reason == "on_read" {
+		minGap = t.truthRestOnReadMinGap
+	}
+	if minGap <= 0 {
+		minGap = 15 * time.Second
+	}
+	if !last.IsZero() && now.Sub(last) < minGap {
+		return false
+	}
+	switch kind {
+	case "position":
+		t.lastPositionRestSync = now
+	case "orders":
+		t.lastOrdersRestSync = now
+	}
+	return true
+}
+
+func (t *FuturesTrader) positionTruthNeedsBackfill() bool {
+	t.positionTruthMu.RLock()
+	defer t.positionTruthMu.RUnlock()
+	if len(t.positionTruthStore) == 0 {
+		return true
+	}
+	for _, p := range t.positionTruthStore {
+		if p.PositionAmt == 0 {
+			continue
+		}
+		if p.EntryPrice <= 0 || p.LiquidationPrice <= 0 || p.Leverage <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func mergePositionTruth(existing, incoming BinancePositionSnapshot) BinancePositionSnapshot {
+	merged := existing
+	updated := false
+	if merged.Symbol == "" {
+		merged.Symbol = incoming.Symbol
+	}
+	if merged.PositionSideRaw == "" && incoming.PositionSideRaw != "" {
+		merged.PositionSideRaw = incoming.PositionSideRaw
+	}
+	if merged.PositionAmt == 0 && incoming.PositionAmt != 0 {
+		merged.PositionAmt = incoming.PositionAmt
+		updated = true
+	}
+	if incoming.EntryPrice > 0 && (merged.EntryPrice <= 0 || incoming.LastTruthUpdate.After(merged.LastTruthUpdate)) {
+		merged.EntryPrice = incoming.EntryPrice
+		updated = true
+	}
+	if incoming.MarkPrice > 0 && (merged.MarkPrice <= 0 || incoming.LastTruthUpdate.After(merged.LastTruthUpdate)) {
+		merged.MarkPrice = incoming.MarkPrice
+		updated = true
+	}
+	if incoming.UnRealizedProfit != 0 && (merged.UnRealizedProfit == 0 || incoming.LastTruthUpdate.After(merged.LastTruthUpdate)) {
+		merged.UnRealizedProfit = incoming.UnRealizedProfit
+		updated = true
+	}
+	if incoming.Leverage > 0 && (merged.Leverage <= 0 || incoming.LastTruthUpdate.After(merged.LastTruthUpdate)) {
+		merged.Leverage = incoming.Leverage
+		updated = true
+	}
+	if incoming.LiquidationPrice > 0 && (merged.LiquidationPrice <= 0 || incoming.LastTruthUpdate.After(merged.LastTruthUpdate)) {
+		merged.LiquidationPrice = incoming.LiquidationPrice
+		updated = true
+	}
+	if incoming.Side != "" && (merged.Side == "" || incoming.LastTruthUpdate.After(merged.LastTruthUpdate)) {
+		merged.Side = incoming.Side
+		updated = true
+	}
+	if updated {
+		merged.DataSource = incoming.DataSource
+		merged.LastTruthUpdate = incoming.LastTruthUpdate
+	}
+	if merged.DataSource == "" {
+		merged.DataSource = existing.DataSource
+	}
+	return merged
+}
+
+func (t *FuturesTrader) refreshPositionTruthREST(reason string) error {
+	positions, err := t.client.NewGetPositionRiskService().Do(context.Background())
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	restTruth := make(map[string]BinancePositionSnapshot)
+	for _, pos := range positions {
+		amt, _ := strconv.ParseFloat(pos.PositionAmt, 64)
+		if amt == 0 {
+			continue
+		}
+		entryPrice, _ := strconv.ParseFloat(pos.EntryPrice, 64)
+		markPrice, _ := strconv.ParseFloat(pos.MarkPrice, 64)
+		unrealized, _ := strconv.ParseFloat(pos.UnRealizedProfit, 64)
+		leverage, _ := strconv.ParseFloat(pos.Leverage, 64)
+		liqPrice, _ := strconv.ParseFloat(pos.LiquidationPrice, 64)
+		sideRaw := strings.ToUpper(strings.TrimSpace(string(pos.PositionSide)))
+		side := normalizePositionSide(sideRaw, amt)
+		if sideRaw == "" {
+			if side == "short" {
+				sideRaw = "SHORT"
+			} else {
+				sideRaw = "LONG"
+			}
+		}
+
+		p := BinancePositionSnapshot{
+			Symbol:           strings.ToUpper(pos.Symbol),
+			PositionAmt:      amt,
+			EntryPrice:       entryPrice,
+			MarkPrice:        markPrice,
+			UnRealizedProfit: unrealized,
+			Leverage:         leverage,
+			LiquidationPrice: liqPrice,
+			Side:             side,
+			PositionSideRaw:  sideRaw,
+			DataSource:       "rest_position_risk",
+			LastTruthUpdate:  now,
+		}
+		restTruth[positionTruthKey(p.Symbol, sideRaw)] = p
+	}
+
+	t.positionTruthMu.Lock()
+	merged := make(map[string]BinancePositionSnapshot, len(t.positionTruthStore)+len(restTruth))
+	for key, p := range t.positionTruthStore {
+		merged[key] = p
+	}
+	for key, p := range restTruth {
+		if existing, ok := merged[key]; ok {
+			merged[key] = mergePositionTruth(existing, p)
+		} else {
+			merged[key] = p
+		}
+		if p.Leverage > 0 {
+			t.setSymbolLeverage(p.Symbol, int(p.Leverage+0.5), "rest_position_risk")
+		}
+	}
+	t.positionTruthStore = merged
+	t.positionTruthUpdated = now
+	t.positionTruthMu.Unlock()
+	logger.Infof("🔄 Binance REST position truth refreshed: reason=%s count=%d", reason, len(restTruth))
+	return nil
+}
+
+func (t *FuturesTrader) refreshPositionTruthHybrid(reason string) error {
+	wsErr := t.refreshPositionTruthWS(reason)
+	needRest := wsErr != nil || t.positionTruthNeedsBackfill()
+	if !needRest || !t.shouldRunRestTruthSync("position", reason) {
+		return wsErr
+	}
+	restErr := t.refreshPositionTruthREST(reason)
+	if restErr != nil {
+		if wsErr != nil {
+			return fmt.Errorf("ws=%v; rest=%w", wsErr, restErr)
+		}
+		logger.Infof("⚠️ Binance REST position truth refresh failed: reason=%s err=%v", reason, restErr)
+	}
+	return wsErr
+}
+
 func (t *FuturesTrader) refreshOpenOrdersBaselineWS(reason string) error {
 	t.ordersRefreshMu.Lock()
 	defer t.ordersRefreshMu.Unlock()
@@ -286,6 +474,115 @@ func (t *FuturesTrader) refreshOpenOrdersBaselineWS(reason string) error {
 	t.openOrdersMu.Unlock()
 	logger.Infof("🔄 Binance WS open orders baseline refreshed: reason=%s count=%d", reason, len(merged))
 	return nil
+}
+
+func hasStopOrTakeProfit(orders map[string]OpenOrder) bool {
+	for _, ord := range orders {
+		ot := strings.ToUpper(ord.Type)
+		if strings.Contains(ot, "STOP") || strings.Contains(ot, "TAKE_PROFIT") {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeOpenOrderByPriority(existing, incoming OpenOrder) OpenOrder {
+	if incoming.LastSyncAt <= 0 {
+		incoming.LastSyncAt = time.Now().UTC().UnixMilli()
+	}
+	if existing.LastSyncAt > incoming.LastSyncAt {
+		return existing
+	}
+	return incoming
+}
+
+func (t *FuturesTrader) refreshOpenOrdersBaselineREST(reason string) error {
+	now := time.Now().UTC().UnixMilli()
+	merged := make(map[string]OpenOrder)
+
+	orders, err := t.client.NewListOpenOrdersService().Do(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, order := range orders {
+		price, _ := strconv.ParseFloat(order.Price, 64)
+		stopPrice, _ := strconv.ParseFloat(order.StopPrice, 64)
+		quantity, _ := strconv.ParseFloat(order.OrigQuantity, 64)
+		o := OpenOrder{
+			OrderID:      fmt.Sprintf("%d", order.OrderID),
+			Symbol:       strings.ToUpper(order.Symbol),
+			Side:         strings.ToUpper(string(order.Side)),
+			PositionSide: strings.ToUpper(string(order.PositionSide)),
+			Type:         strings.ToUpper(string(order.Type)),
+			Price:        price,
+			StopPrice:    stopPrice,
+			Quantity:     quantity,
+			Status:       strings.ToUpper(string(order.Status)),
+			Source:       "rest_open_orders",
+			LastSyncAt:   now,
+		}
+		merged[o.OrderID] = o
+	}
+
+	algoOrders, algoErr := t.client.NewListOpenAlgoOrdersService().Do(context.Background())
+	if algoErr == nil {
+		for _, algoOrder := range algoOrders {
+			triggerPrice, _ := strconv.ParseFloat(algoOrder.TriggerPrice, 64)
+			quantity, _ := strconv.ParseFloat(algoOrder.Quantity, 64)
+			o := OpenOrder{
+				OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
+				Symbol:       strings.ToUpper(algoOrder.Symbol),
+				Side:         strings.ToUpper(string(algoOrder.Side)),
+				PositionSide: strings.ToUpper(string(algoOrder.PositionSide)),
+				Type:         strings.ToUpper(string(algoOrder.OrderType)),
+				Price:        0,
+				StopPrice:    triggerPrice,
+				Quantity:     quantity,
+				Status:       "NEW",
+				Source:       "rest_algo_orders",
+				LastSyncAt:   now,
+			}
+			merged[o.OrderID] = o
+		}
+	} else if !contains(algoErr.Error(), "no algo") && !contains(algoErr.Error(), "No algo") {
+		return algoErr
+	}
+
+	t.openOrdersMu.Lock()
+	next := make(map[string]OpenOrder, len(t.openOrders)+len(merged))
+	for id, ord := range t.openOrders {
+		next[id] = ord
+	}
+	for id, ord := range merged {
+		if old, ok := next[id]; ok {
+			next[id] = mergeOpenOrderByPriority(old, ord)
+		} else {
+			next[id] = ord
+		}
+	}
+	t.openOrders = next
+	t.openOrdersCache = time.Now()
+	t.openOrdersMu.Unlock()
+	logger.Infof("🔄 Binance REST open orders baseline refreshed: reason=%s count=%d", reason, len(merged))
+	return nil
+}
+
+func (t *FuturesTrader) refreshOpenOrdersHybrid(reason string) error {
+	wsErr := t.refreshOpenOrdersBaselineWS(reason)
+	t.openOrdersMu.RLock()
+	needRest := wsErr != nil || len(t.openOrders) == 0 || !hasStopOrTakeProfit(t.openOrders)
+	t.openOrdersMu.RUnlock()
+	if !needRest || !t.shouldRunRestTruthSync("orders", reason) {
+		return wsErr
+	}
+	restErr := t.refreshOpenOrdersBaselineREST(reason)
+	if restErr != nil {
+		if wsErr != nil {
+			return fmt.Errorf("ws=%v; rest=%w", wsErr, restErr)
+		}
+		logger.Infof("⚠️ Binance REST open orders refresh failed: reason=%s err=%v", reason, restErr)
+	}
+	return wsErr
 }
 
 func (t *FuturesTrader) startAccountBaselineSyncLoop() {
@@ -335,7 +632,7 @@ func (t *FuturesTrader) startOrdersBaselineSyncLoop() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := t.refreshOpenOrdersBaselineWS("periodic"); err != nil {
+				if err := t.refreshOpenOrdersHybrid("periodic"); err != nil {
 					logger.Infof("⚠️ Binance WS periodic open orders refresh failed: %v", err)
 				}
 			case <-t.ordersDirtyCh:
@@ -344,7 +641,7 @@ func (t *FuturesTrader) startOrdersBaselineSyncLoop() {
 					continue
 				}
 				lastEventRefresh = now
-				if err := t.refreshOpenOrdersBaselineWS("event"); err != nil {
+				if err := t.refreshOpenOrdersHybrid("event"); err != nil {
 					logger.Infof("⚠️ Binance WS event open orders refresh failed: %v", err)
 				}
 			}
@@ -367,7 +664,7 @@ func (t *FuturesTrader) startPositionTruthSyncLoop() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := t.refreshPositionTruthWS("periodic"); err != nil {
+				if err := t.refreshPositionTruthHybrid("periodic"); err != nil {
 					logger.Infof("⚠️ Binance WS periodic position truth refresh failed: %v", err)
 				}
 			case <-t.positionDirtyCh:
@@ -376,7 +673,7 @@ func (t *FuturesTrader) startPositionTruthSyncLoop() {
 					continue
 				}
 				lastEventRefresh = now
-				if err := t.refreshPositionTruthWS("event"); err != nil {
+				if err := t.refreshPositionTruthHybrid("event"); err != nil {
 					logger.Infof("⚠️ Binance WS event position truth refresh failed: %v", err)
 				}
 			}
@@ -391,6 +688,8 @@ func normalizeBinanceSymbol(symbol string) string {
 func leverageSourcePriority(source string) int {
 	switch source {
 	case "ws_config", "api_set":
+		return 3
+	case "rest_position_risk":
 		return 3
 	case "store":
 		return 2
@@ -583,6 +882,9 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		positionDirtyCh:        make(chan struct{}, 1),
 		positionSyncInterval:   45 * time.Second,
 		positionTruthStore:     make(map[string]BinancePositionSnapshot),
+		truthHybridMode:        true,
+		truthRestSyncInterval:  60 * time.Second,
+		truthRestOnReadMinGap:  15 * time.Second,
 	}
 	trader.acquireFuturesWsEnv()
 	trader.futuresWsEnvAcquired = true
@@ -614,6 +916,12 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 	trader.startAccountBaselineSyncLoop()
 	trader.startOrdersBaselineSyncLoop()
 	trader.startPositionTruthSyncLoop()
+	if err := trader.refreshPositionTruthHybrid("startup"); err != nil {
+		logger.Infof("⚠️ Binance startup position truth refresh failed: %v", err)
+	}
+	if err := trader.refreshOpenOrdersHybrid("startup"); err != nil {
+		logger.Infof("⚠️ Binance startup open orders refresh failed: %v", err)
+	}
 	trader.markAccountStateDirty()
 	trader.markOrdersStateDirty()
 	trader.markPositionStateDirty()
@@ -854,7 +1162,7 @@ func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, a
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	if t.strictWSOnly {
 		if age, ok := t.positionTruthAge(); !ok || age > 20*time.Second {
-			if err := t.refreshPositionTruthWS("on_read"); err != nil {
+			if err := t.refreshPositionTruthHybrid("on_read"); err != nil {
 				logger.Infof("⚠️ Binance WS on-read position truth refresh failed: %v", err)
 			}
 		}
@@ -1686,7 +1994,7 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 		cacheCount := len(t.openOrders)
 		t.openOrdersMu.RUnlock()
 		if cacheCount == 0 || cacheAge > 45*time.Second {
-			if err := t.refreshOpenOrdersBaselineWS("on_read"); err != nil {
+			if err := t.refreshOpenOrdersHybrid("on_read"); err != nil {
 				logger.Infof("⚠️ Binance WS on-read open orders refresh failed: %v", err)
 			}
 		}

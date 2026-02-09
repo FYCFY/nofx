@@ -611,6 +611,9 @@ func (g *binanceWsReadGateway) getPositionRiskSnapshot(symbol string, timeout ti
 		}
 		amt := parseAnyFloat(pos["positionAmt"])
 		if amt == 0 {
+			amt = parseAnyFloat(pos["amount"])
+		}
+		if amt == 0 {
 			continue
 		}
 		sym := strings.ToUpper(fmt.Sprintf("%v", pos["symbol"]))
@@ -625,13 +628,8 @@ func (g *binanceWsReadGateway) getPositionRiskSnapshot(symbol string, timeout ti
 		}
 		leverage := parseAnyFloat(pos["leverage"])
 		liqPrice := parseAnyFloat(pos["liquidationPrice"])
-		notional := parseAnyFloat(pos["notional"])
-		initialMargin := parseAnyFloat(pos["initialMargin"])
-		if leverage <= 0 && initialMargin > 0 {
-			leverage = math.Abs(notional / initialMargin)
-		}
 		if leverage <= 0 {
-			leverage = 10
+			leverage = parseAnyFloat(pos["currentLeverage"])
 		}
 		positions = append(positions, BinancePositionSnapshot{
 			Symbol:           sym,
@@ -904,6 +902,26 @@ func normalizePositionSide(sideRaw string, amt float64) string {
 	}
 }
 
+func normalizeOrderType(orderType string) string {
+	ot := strings.ToUpper(strings.TrimSpace(orderType))
+	switch {
+	case strings.Contains(ot, "TAKE_PROFIT"):
+		if strings.Contains(ot, "MARKET") {
+			return "TAKE_PROFIT_MARKET"
+		}
+		return "TAKE_PROFIT"
+	case strings.Contains(ot, "STOP"):
+		if strings.Contains(ot, "MARKET") {
+			return "STOP_MARKET"
+		}
+		return "STOP"
+	case strings.Contains(ot, "LIMIT"):
+		return "LIMIT"
+	default:
+		return ot
+	}
+}
+
 func parseOpenOrdersRows(resultRaw interface{}, source string) []OpenOrder {
 	rows, ok := resultRaw.([]interface{})
 	if !ok {
@@ -940,6 +958,7 @@ func parseOpenOrdersRows(resultRaw interface{}, source string) []OpenOrder {
 		if orderType == "" || orderType == "<nil>" {
 			orderType = strings.ToUpper(fmt.Sprintf("%v", m["orderType"]))
 		}
+		orderType = normalizeOrderType(orderType)
 		order := OpenOrder{
 			OrderID:      orderID,
 			Symbol:       symbol,
@@ -955,6 +974,9 @@ func parseOpenOrdersRows(resultRaw interface{}, source string) []OpenOrder {
 		}
 		if order.StopPrice <= 0 {
 			order.StopPrice = parseAnyFloat(m["triggerPrice"])
+		}
+		if order.StopPrice <= 0 {
+			order.StopPrice = parseAnyFloat(m["activatePrice"])
 		}
 		if order.Quantity <= 0 {
 			order.Quantity = parseAnyFloat(m["origQuantity"])
