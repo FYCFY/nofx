@@ -87,18 +87,50 @@ func (t *FuturesTrader) fetchAccountSnapshotWS() (*BinanceAccountSnapshot, error
 	if t.wsGateway == nil {
 		return nil, fmt.Errorf("binance ws gateway not initialized")
 	}
-	// Retry with extended timeout to reduce transient timeout failures.
-	timeouts := []time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second}
-	var lastErr error
-	for i, timeout := range timeouts {
-		snap, err := t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: timeout})
-		if err == nil {
-			return snap, nil
-		}
-		lastErr = err
-		logger.Infof("⚠️ Binance WS account snapshot attempt %d/%d failed (timeout=%s): %v", i+1, len(timeouts), timeout, err)
+	if err := t.wsGateway.waitReady(3 * time.Second); err != nil {
+		return nil, fmt.Errorf("binance ws api not ready: %w", err)
 	}
-	return nil, fmt.Errorf("all ws account snapshot attempts failed: %w", lastErr)
+	return t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+}
+
+func (t *FuturesTrader) applyAccountSnapshotToCaches(snap *BinanceAccountSnapshot) {
+	if snap == nil {
+		return
+	}
+
+	result := map[string]interface{}{
+		"totalWalletBalance":    snap.TotalWalletBalance,
+		"availableBalance":      snap.AvailableBalance,
+		"totalUnrealizedProfit": snap.TotalUnrealizedProfit,
+	}
+
+	positions := make([]map[string]interface{}, 0, len(snap.Positions))
+	for _, p := range snap.Positions {
+		if p.PositionAmt == 0 {
+			continue
+		}
+		positions = append(positions, map[string]interface{}{
+			"symbol":           p.Symbol,
+			"positionAmt":      p.PositionAmt,
+			"entryPrice":       p.EntryPrice,
+			"markPrice":        p.MarkPrice,
+			"unRealizedProfit": p.UnRealizedProfit,
+			"leverage":         p.Leverage,
+			"liquidationPrice": p.LiquidationPrice,
+			"side":             p.Side,
+		})
+	}
+
+	now := time.Now()
+	t.balanceCacheMutex.Lock()
+	t.cachedBalance = result
+	t.balanceCacheTime = now
+	t.balanceCacheMutex.Unlock()
+
+	t.positionsCacheMutex.Lock()
+	t.cachedPositions = positions
+	t.positionsCacheTime = now
+	t.positionsCacheMutex.Unlock()
 }
 
 // NewFuturesTrader creates futures trader
@@ -201,7 +233,7 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	if t.strictWSOnly {
 		// Prefer stream-updated cache first.
 		t.balanceCacheMutex.RLock()
-		if t.cachedBalance != nil && time.Since(t.balanceCacheTime) < 5*time.Minute {
+		if t.cachedBalance != nil && (t.isUserStreamFresh() || time.Since(t.balanceCacheTime) < 5*time.Minute) {
 			cached := t.cachedBalance
 			t.balanceCacheMutex.RUnlock()
 			return cached, nil
@@ -210,26 +242,13 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 
 		snap, err := t.fetchAccountSnapshotWS()
 		if err != nil {
-			t.balanceCacheMutex.RLock()
-			if t.cachedBalance != nil {
-				cached := t.cachedBalance
-				cacheAge := time.Since(t.balanceCacheTime)
-				t.balanceCacheMutex.RUnlock()
-				logger.Infof("⚠️ Binance WS balance query failed, returning cached balance (age=%s): %v", cacheAge.Round(time.Second), err)
-				return cached, nil
-			}
-			t.balanceCacheMutex.RUnlock()
 			return nil, fmt.Errorf("failed to get account info via websocket: %w", err)
 		}
-		result := map[string]interface{}{
-			"totalWalletBalance":    snap.TotalWalletBalance,
-			"availableBalance":      snap.AvailableBalance,
-			"totalUnrealizedProfit": snap.TotalUnrealizedProfit,
-		}
-		t.balanceCacheMutex.Lock()
-		t.cachedBalance = result
-		t.balanceCacheTime = time.Now()
-		t.balanceCacheMutex.Unlock()
+		t.applyAccountSnapshotToCaches(snap)
+
+		t.balanceCacheMutex.RLock()
+		result := t.cachedBalance
+		t.balanceCacheMutex.RUnlock()
 		return result, nil
 	}
 
@@ -370,7 +389,7 @@ func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, a
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	if t.strictWSOnly {
 		t.positionsCacheMutex.RLock()
-		if t.cachedPositions != nil && time.Since(t.positionsCacheTime) < 5*time.Minute {
+		if t.cachedPositions != nil && (t.isUserStreamFresh() || time.Since(t.positionsCacheTime) < 5*time.Minute) {
 			cached := t.cachedPositions
 			t.positionsCacheMutex.RUnlock()
 			return cached, nil
@@ -379,38 +398,13 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 
 		snap, err := t.fetchAccountSnapshotWS()
 		if err != nil {
-			t.positionsCacheMutex.RLock()
-			if t.cachedPositions != nil {
-				cached := t.cachedPositions
-				cacheAge := time.Since(t.positionsCacheTime)
-				t.positionsCacheMutex.RUnlock()
-				logger.Infof("⚠️ Binance WS positions query failed, returning cached positions (age=%s): %v", cacheAge.Round(time.Second), err)
-				return cached, nil
-			}
-			t.positionsCacheMutex.RUnlock()
 			return nil, fmt.Errorf("failed to get positions via websocket: %w", err)
 		}
+		t.applyAccountSnapshotToCaches(snap)
 
-		var result []map[string]interface{}
-		for _, p := range snap.Positions {
-			if p.PositionAmt == 0 {
-				continue
-			}
-			result = append(result, map[string]interface{}{
-				"symbol":           p.Symbol,
-				"positionAmt":      p.PositionAmt,
-				"entryPrice":       p.EntryPrice,
-				"markPrice":        p.MarkPrice,
-				"unRealizedProfit": p.UnRealizedProfit,
-				"leverage":         p.Leverage,
-				"liquidationPrice": p.LiquidationPrice,
-				"side":             p.Side,
-			})
-		}
-		t.positionsCacheMutex.Lock()
-		t.cachedPositions = result
-		t.positionsCacheTime = time.Now()
-		t.positionsCacheMutex.Unlock()
+		t.positionsCacheMutex.RLock()
+		result := t.cachedPositions
+		t.positionsCacheMutex.RUnlock()
 		return result, nil
 	}
 

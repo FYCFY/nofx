@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"nofx/logger"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,8 +17,6 @@ import (
 
 	binance "github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/futures"
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -55,11 +54,13 @@ type binanceWsReadGateway struct {
 	futuresClient *futures.Client
 	spotClient    *binance.Client
 	isTestnet     bool
+	closed        chan struct{}
+
+	futuresConnMgr wsConnManager
+	spotConnMgr    wsConnManager
 
 	accountSF singleflight.Group
 	metaSF    singleflight.Group
-	priceSF   singleflight.Group
-	depthSF   singleflight.Group
 
 	metaMu     sync.RWMutex
 	symbolMeta map[string]BinanceSymbolMeta
@@ -67,10 +68,12 @@ type binanceWsReadGateway struct {
 	priceMu    sync.RWMutex
 	priceCache map[string]float64
 	priceTime  map[string]time.Time
+	priceSubs  map[string]chan struct{}
 
 	depthMu    sync.RWMutex
 	depthCache map[string]wsDepthSnapshot
 	depthTime  map[string]time.Time
+	depthSubs  map[string]chan struct{}
 }
 
 type wsDepthSnapshot struct {
@@ -79,16 +82,53 @@ type wsDepthSnapshot struct {
 }
 
 func newBinanceWsReadGateway(futuresClient *futures.Client, spotClient *binance.Client, isTestnet bool) *binanceWsReadGateway {
-	return &binanceWsReadGateway{
+	futuresEndpoint := futures.BaseWsApiMainURL
+	if isTestnet {
+		futuresEndpoint = futures.BaseWsApiTestnetURL
+	}
+
+	spotEndpoint := binance.BaseWsApiMainURL
+	if binance.UseTestnet {
+		spotEndpoint = binance.BaseWsApiTestnetURL
+	}
+
+	g := &binanceWsReadGateway{
 		futuresClient: futuresClient,
 		spotClient:    spotClient,
 		isTestnet:     isTestnet,
+		closed:        make(chan struct{}),
 		symbolMeta:    make(map[string]BinanceSymbolMeta),
 		priceCache:    make(map[string]float64),
 		priceTime:     make(map[string]time.Time),
+		priceSubs:     make(map[string]chan struct{}),
 		depthCache:    make(map[string]wsDepthSnapshot),
 		depthTime:     make(map[string]time.Time),
+		depthSubs:     make(map[string]chan struct{}),
 	}
+	g.futuresConnMgr = newWSAPIConnManager(
+		"futures-wsapi",
+		futuresEndpoint,
+		futuresClient.APIKey,
+		futuresClient.SecretKey,
+		func() int64 { return futuresClient.TimeOffset },
+	)
+	g.spotConnMgr = newWSAPIConnManager(
+		"spot-wsapi",
+		spotEndpoint,
+		spotClient.APIKey,
+		spotClient.SecretKey,
+		func() int64 { return spotClient.TimeOffset },
+	)
+	g.futuresConnMgr.Start()
+	g.spotConnMgr.Start()
+	return g
+}
+
+func (g *binanceWsReadGateway) waitReady(timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	return g.futuresConnMgr.WaitReady(timeout)
 }
 
 func (g *binanceWsReadGateway) getFuturesAccountSnapshot(opts BinanceWsReadOptions) (*BinanceAccountSnapshot, error) {
@@ -98,36 +138,23 @@ func (g *binanceWsReadGateway) getFuturesAccountSnapshot(opts BinanceWsReadOptio
 	}
 
 	v, err, _ := g.accountSF.Do("futures-account", func() (interface{}, error) {
-		ch := make(chan struct {
-			resp *futures.WsAccountV2InfoResponse
-			err  error
-		}, 1)
-		go func() {
-			resp, callErr := g.futuresClient.GetAccountInfoWs()
-			ch <- struct {
-				resp *futures.WsAccountV2InfoResponse
-				err  error
-			}{resp: resp, err: callErr}
-		}()
-
-		select {
-		case out := <-ch:
-			if out.err != nil {
-				return nil, out.err
-			}
-			if out.resp == nil {
-				return nil, fmt.Errorf("empty ws account response")
-			}
-			if out.resp.Error != nil {
-				return nil, out.resp.Error
-			}
-			if out.resp.Status != 200 {
-				return nil, fmt.Errorf("unexpected ws account status: %d", out.resp.Status)
-			}
-			return buildSnapshotFromWsAccountInfo(out.resp.Result), nil
-		case <-time.After(timeout):
-			return nil, fmt.Errorf("ws account snapshot timeout")
+		resp, callErr := g.futuresConnMgr.Send("v2/account.status", nil, true, timeout)
+		if callErr != nil {
+			return nil, callErr
 		}
+		resultRaw, ok := resp["result"]
+		if !ok {
+			return nil, fmt.Errorf("futures ws account response missing result")
+		}
+		raw, marshalErr := json.Marshal(resultRaw)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		var info futures.AccountV3
+		if unmarshalErr := json.Unmarshal(raw, &info); unmarshalErr != nil {
+			return nil, unmarshalErr
+		}
+		return buildSnapshotFromWsAccountInfo(info), nil
 	})
 	if err != nil {
 		return nil, err
@@ -197,7 +224,7 @@ func (g *binanceWsReadGateway) getSpotUSDTBalance(opts BinanceWsReadOptions) (fl
 	}
 
 	params := map[string]interface{}{}
-	resp, err := g.callSpotSignedWS("account.status", params, timeout)
+	resp, err := g.spotConnMgr.Send("account.status", params, true, timeout)
 	if err != nil {
 		return 0, err
 	}
@@ -230,58 +257,27 @@ func (g *binanceWsReadGateway) getMarketPrice(symbol string, timeout time.Durati
 		timeout = 5 * time.Second
 	}
 	symbol = strings.ToUpper(symbol)
-	key := "price-" + symbol
-	v, err, _ := g.priceSF.Do(key, func() (interface{}, error) {
-		eventCh := make(chan *futures.WsMarkPriceEvent, 1)
-		errCh := make(chan error, 1)
-		doneC, stopC, err := futures.WsMarkPriceServe(symbol, func(event *futures.WsMarkPriceEvent) {
-			select {
-			case eventCh <- event:
-			default:
-			}
-		}, func(e error) {
-			select {
-			case errCh <- e:
-			default:
-			}
-		})
-		if err != nil {
-			return nil, err
-		}
-		defer close(stopC)
-		select {
-		case evt := <-eventCh:
-			if evt == nil {
-				return nil, fmt.Errorf("empty mark price event")
-			}
-			price := parseFloatWS(evt.MarkPrice)
-			if price <= 0 {
-				return nil, fmt.Errorf("invalid mark price")
-			}
-			g.priceMu.Lock()
-			g.priceCache[symbol] = price
-			g.priceTime[symbol] = time.Now().UTC()
-			g.priceMu.Unlock()
-			return price, nil
-		case e := <-errCh:
-			return nil, e
-		case <-doneC:
-			return nil, fmt.Errorf("mark price stream closed")
-		case <-time.After(timeout):
-			return nil, fmt.Errorf("mark price timeout")
-		}
-	})
-	if err != nil {
+	if err := g.ensureMarkPriceStream(symbol); err != nil {
+		return 0, err
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
 		g.priceMu.RLock()
 		cached, ok := g.priceCache[symbol]
 		ts := g.priceTime[symbol]
 		g.priceMu.RUnlock()
-		if ok && time.Since(ts) < 30*time.Second {
+		if ok && cached > 0 && time.Since(ts) < 30*time.Second {
 			return cached, nil
 		}
-		return 0, err
+		if time.Now().After(deadline) {
+			if ok && cached > 0 {
+				return cached, nil
+			}
+			return 0, fmt.Errorf("mark price timeout")
+		}
+		time.Sleep(120 * time.Millisecond)
 	}
-	return v.(float64), nil
 }
 
 func (g *binanceWsReadGateway) getOrderBook(symbol string, depth, limit int, timeout time.Duration) ([][]float64, [][]float64, error) {
@@ -296,69 +292,35 @@ func (g *binanceWsReadGateway) getOrderBook(symbol string, depth, limit int, tim
 	}
 	symbol = strings.ToUpper(symbol)
 	key := fmt.Sprintf("depth-%s-%d", symbol, depth)
-	v, err, _ := g.depthSF.Do(key, func() (interface{}, error) {
-		eventCh := make(chan *futures.WsDepthEvent, 1)
-		errCh := make(chan error, 1)
-		doneC, stopC, err := futures.WsPartialDepthServe(symbol, depth, func(event *futures.WsDepthEvent) {
-			select {
-			case eventCh <- event:
-			default:
-			}
-		}, func(e error) {
-			select {
-			case errCh <- e:
-			default:
-			}
-		})
-		if err != nil {
-			return nil, err
-		}
-		defer close(stopC)
+	if err := g.ensureDepthStream(symbol, depth); err != nil {
+		return nil, nil, err
+	}
 
-		select {
-		case evt := <-eventCh:
-			if evt == nil {
-				return nil, fmt.Errorf("empty depth event")
-			}
-			bids := make([][]float64, 0, len(evt.Bids))
-			for _, b := range evt.Bids {
-				bids = append(bids, []float64{parseFloatWS(b.Price), parseFloatWS(b.Quantity)})
-			}
-			asks := make([][]float64, 0, len(evt.Asks))
-			for _, a := range evt.Asks {
-				asks = append(asks, []float64{parseFloatWS(a.Price), parseFloatWS(a.Quantity)})
-			}
+	deadline := time.Now().Add(timeout)
+	for {
+		g.depthMu.RLock()
+		cached, ok := g.depthCache[key]
+		ts := g.depthTime[key]
+		g.depthMu.RUnlock()
+		if ok && time.Since(ts) < 10*time.Second {
+			bids := cached.bids
+			asks := cached.asks
 			if len(bids) > limit {
 				bids = bids[:limit]
 			}
 			if len(asks) > limit {
 				asks = asks[:limit]
 			}
-			g.depthMu.Lock()
-			g.depthCache[key] = wsDepthSnapshot{bids: bids, asks: asks}
-			g.depthTime[key] = time.Now().UTC()
-			g.depthMu.Unlock()
-			return wsDepthSnapshot{bids: bids, asks: asks}, nil
-		case e := <-errCh:
-			return nil, e
-		case <-doneC:
-			return nil, fmt.Errorf("depth stream closed")
-		case <-time.After(timeout):
-			return nil, fmt.Errorf("depth timeout")
+			return bids, asks, nil
 		}
-	})
-	if err != nil {
-		g.depthMu.RLock()
-		cached, ok := g.depthCache[key]
-		ts := g.depthTime[key]
-		g.depthMu.RUnlock()
-		if ok && time.Since(ts) < 10*time.Second {
-			return cached.bids, cached.asks, nil
+		if time.Now().After(deadline) {
+			if ok {
+				return cached.bids, cached.asks, nil
+			}
+			return nil, nil, fmt.Errorf("depth timeout")
 		}
-		return nil, nil, err
+		time.Sleep(120 * time.Millisecond)
 	}
-	depthSnap := v.(wsDepthSnapshot)
-	return depthSnap.bids, depthSnap.asks, nil
 }
 
 func (g *binanceWsReadGateway) getSymbolMeta(symbol string, timeout time.Duration) (BinanceSymbolMeta, error) {
@@ -375,7 +337,7 @@ func (g *binanceWsReadGateway) getSymbolMeta(symbol string, timeout time.Duratio
 	g.metaMu.RUnlock()
 
 	v, err, _ := g.metaSF.Do("meta-"+symbol, func() (interface{}, error) {
-		resp, callErr := g.callFuturesPublicWS("exchangeInfo", map[string]interface{}{"symbol": symbol}, timeout)
+		resp, callErr := g.futuresConnMgr.Send("exchangeInfo", map[string]interface{}{"symbol": symbol}, false, timeout)
 		if callErr != nil {
 			return nil, callErr
 		}
@@ -437,121 +399,208 @@ func (g *binanceWsReadGateway) getOrderStatus(symbol string, orderID int64, time
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	svc, err := futures.NewOrderStatusWsService(g.futuresClient.APIKey, g.futuresClient.SecretKey)
+	resp, err := g.futuresConnMgr.Send("order.status", map[string]interface{}{
+		"symbol":  strings.ToUpper(symbol),
+		"orderId": orderID,
+	}, true, timeout)
 	if err != nil {
 		return nil, err
 	}
-	svc.TimeOffset = g.futuresClient.TimeOffset
+	resultRaw, ok := resp["result"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected ws order status response")
+	}
+	orderIDVal := int64(parseAnyFloat(resultRaw["orderId"]))
+	if orderIDVal == 0 {
+		orderIDVal = int64(parseAnyFloat(resultRaw["orderID"]))
+	}
+	symbolVal := fmt.Sprintf("%v", resultRaw["symbol"])
+	if symbolVal == "" {
+		symbolVal = strings.ToUpper(symbol)
+	}
+	return map[string]interface{}{
+		"orderId":     orderIDVal,
+		"symbol":      symbolVal,
+		"status":      fmt.Sprintf("%v", resultRaw["status"]),
+		"avgPrice":    parseAnyFloat(resultRaw["avgPrice"]),
+		"executedQty": parseAnyFloat(resultRaw["executedQty"]),
+		"side":        fmt.Sprintf("%v", resultRaw["side"]),
+		"type":        fmt.Sprintf("%v", resultRaw["type"]),
+		"time":        int64(parseAnyFloat(resultRaw["time"])),
+		"updateTime":  int64(parseAnyFloat(resultRaw["updateTime"])),
+		"commission":  0.0,
+	}, nil
+}
 
-	req := futures.NewOrderStatusWsRequest().Symbol(strings.ToUpper(symbol)).OrderID(orderID)
-	ch := make(chan struct {
-		resp *futures.QueryOrderWsResponse
-		err  error
-	}, 1)
-	go func() {
-		resp, callErr := svc.SyncDo(uuid.NewString(), req)
-		ch <- struct {
-			resp *futures.QueryOrderWsResponse
-			err  error
-		}{resp: resp, err: callErr}
-	}()
+func (g *binanceWsReadGateway) ensureMarkPriceStream(symbol string) error {
+	symbol = strings.ToUpper(symbol)
+	g.priceMu.Lock()
+	if _, ok := g.priceSubs[symbol]; ok {
+		g.priceMu.Unlock()
+		return nil
+	}
+	stop := make(chan struct{})
+	g.priceSubs[symbol] = stop
+	g.priceMu.Unlock()
 
-	select {
-	case out := <-ch:
-		if out.err != nil {
-			return nil, out.err
+	go g.runMarkPriceStreamLoop(symbol, stop)
+	return nil
+}
+
+func (g *binanceWsReadGateway) runMarkPriceStreamLoop(symbol string, stop <-chan struct{}) {
+	backoff := time.Second
+	for {
+		select {
+		case <-stop:
+			return
+		case <-g.closed:
+			return
+		default:
 		}
-		if out.resp == nil {
-			return nil, fmt.Errorf("empty ws order status response")
+
+		doneC, stopC, err := futures.WsMarkPriceServe(symbol, func(event *futures.WsMarkPriceEvent) {
+			if event == nil {
+				return
+			}
+			price := parseFloatWS(event.MarkPrice)
+			if price <= 0 {
+				return
+			}
+			g.priceMu.Lock()
+			g.priceCache[symbol] = price
+			g.priceTime[symbol] = time.Now().UTC()
+			g.priceMu.Unlock()
+		}, func(err error) {
+			if err != nil {
+				logger.Infof("⚠️ Binance mark price stream error (%s): %v", symbol, err)
+			}
+		})
+		if err != nil {
+			logger.Infof("⚠️ Failed to start Binance mark price stream (%s): %v", symbol, err)
+			select {
+			case <-time.After(backoff):
+			case <-stop:
+				return
+			case <-g.closed:
+				return
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
 		}
-		if out.resp.Error != nil {
-			return nil, out.resp.Error
+		backoff = time.Second
+
+		select {
+		case <-doneC:
+		case <-stop:
+			close(stopC)
+			<-doneC
+			return
+		case <-g.closed:
+			close(stopC)
+			<-doneC
+			return
 		}
-		if out.resp.Status != 200 {
-			return nil, fmt.Errorf("unexpected ws order status: %d", out.resp.Status)
+		select {
+		case <-time.After(backoff):
+		case <-stop:
+			return
+		case <-g.closed:
+			return
 		}
-		avgPrice, _ := strconv.ParseFloat(out.resp.Result.AvgPrice, 64)
-		executedQty, _ := strconv.ParseFloat(out.resp.Result.ExecutedQty, 64)
-		return map[string]interface{}{
-			"orderId":     out.resp.Result.OrderID,
-			"symbol":      out.resp.Result.Symbol,
-			"status":      out.resp.Result.Status,
-			"avgPrice":    avgPrice,
-			"executedQty": executedQty,
-			"side":        out.resp.Result.Side,
-			"type":        out.resp.Result.Type,
-			"time":        out.resp.Result.Time,
-			"updateTime":  out.resp.Result.UpdateTime,
-			"commission":  0.0,
-		}, nil
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("ws order status timeout")
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
 }
 
-func (g *binanceWsReadGateway) callFuturesPublicWS(method string, params map[string]interface{}, timeout time.Duration) (map[string]interface{}, error) {
-	endpoint := futures.BaseWsApiMainURL
-	if g.isTestnet {
-		endpoint = futures.BaseWsApiTestnetURL
+func (g *binanceWsReadGateway) ensureDepthStream(symbol string, depth int) error {
+	key := fmt.Sprintf("depth-%s-%d", strings.ToUpper(symbol), depth)
+	g.depthMu.Lock()
+	if _, ok := g.depthSubs[key]; ok {
+		g.depthMu.Unlock()
+		return nil
 	}
-	return callWsAPI(endpoint, method, params, timeout)
+	stop := make(chan struct{})
+	g.depthSubs[key] = stop
+	g.depthMu.Unlock()
+
+	go g.runDepthStreamLoop(strings.ToUpper(symbol), depth, key, stop)
+	return nil
 }
 
-func (g *binanceWsReadGateway) callSpotSignedWS(method string, params map[string]interface{}, timeout time.Duration) (map[string]interface{}, error) {
-	if params == nil {
-		params = make(map[string]interface{})
-	}
-	params["apiKey"] = g.spotClient.APIKey
-	timestamp := time.Now().UnixMilli() - g.spotClient.TimeOffset
-	params["timestamp"] = timestamp
-	sig := signQuery(g.spotClient.SecretKey, params)
-	params["signature"] = sig
+func (g *binanceWsReadGateway) runDepthStreamLoop(symbol string, depth int, key string, stop <-chan struct{}) {
+	backoff := time.Second
+	for {
+		select {
+		case <-stop:
+			return
+		case <-g.closed:
+			return
+		default:
+		}
 
-	endpoint := binance.BaseWsApiMainURL
-	if binance.UseTestnet {
-		endpoint = binance.BaseWsApiTestnetURL
-	}
-	return callWsAPI(endpoint, method, params, timeout)
-}
+		doneC, stopC, err := futures.WsPartialDepthServe(symbol, depth, func(event *futures.WsDepthEvent) {
+			if event == nil {
+				return
+			}
+			bids := make([][]float64, 0, len(event.Bids))
+			for _, b := range event.Bids {
+				bids = append(bids, []float64{parseFloatWS(b.Price), parseFloatWS(b.Quantity)})
+			}
+			asks := make([][]float64, 0, len(event.Asks))
+			for _, a := range event.Asks {
+				asks = append(asks, []float64{parseFloatWS(a.Price), parseFloatWS(a.Quantity)})
+			}
+			g.depthMu.Lock()
+			g.depthCache[key] = wsDepthSnapshot{bids: bids, asks: asks}
+			g.depthTime[key] = time.Now().UTC()
+			g.depthMu.Unlock()
+		}, func(err error) {
+			if err != nil {
+				logger.Infof("⚠️ Binance depth stream error (%s): %v", key, err)
+			}
+		})
+		if err != nil {
+			logger.Infof("⚠️ Failed to start Binance depth stream (%s): %v", key, err)
+			select {
+			case <-time.After(backoff):
+			case <-stop:
+				return
+			case <-g.closed:
+				return
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = time.Second
 
-func callWsAPI(endpoint, method string, params map[string]interface{}, timeout time.Duration) (map[string]interface{}, error) {
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+		select {
+		case <-doneC:
+		case <-stop:
+			close(stopC)
+			<-doneC
+			return
+		case <-g.closed:
+			close(stopC)
+			<-doneC
+			return
+		}
 
-	if params == nil {
-		params = make(map[string]interface{})
+		select {
+		case <-time.After(backoff):
+		case <-stop:
+			return
+		case <-g.closed:
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
-
-	req := map[string]interface{}{
-		"id":     uuid.NewString(),
-		"method": method,
-		"params": params,
-	}
-	if err := conn.WriteJSON(req); err != nil {
-		return nil, err
-	}
-
-	var resp map[string]interface{}
-	if err := conn.ReadJSON(&resp); err != nil {
-		return nil, err
-	}
-	if errNode, ok := resp["error"].(map[string]interface{}); ok {
-		code := fmt.Sprintf("%v", errNode["code"])
-		msg := fmt.Sprintf("%v", errNode["msg"])
-		return nil, fmt.Errorf("binance ws api error code=%s msg=%s", code, msg)
-	}
-	if status, ok := resp["status"].(float64); ok && int(status) >= 400 {
-		return nil, fmt.Errorf("binance ws api status=%d", int(status))
-	}
-	return resp, nil
 }
 
 func signQuery(secret string, params map[string]interface{}) string {
