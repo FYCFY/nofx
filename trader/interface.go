@@ -8,19 +8,19 @@ import (
 
 // ClosedPnLRecord represents a single closed position record from exchange
 type ClosedPnLRecord struct {
-	Symbol       string    // Trading pair (e.g., "BTCUSDT")
-	Side         string    // "long" or "short"
-	EntryPrice   float64   // Entry price
-	ExitPrice    float64   // Exit/close price
-	Quantity     float64   // Position size
-	RealizedPnL  float64   // Realized profit/loss
-	Fee          float64   // Trading fee/commission
-	Leverage     int       // Leverage used
-	EntryTime    time.Time // Position open time
-	ExitTime     time.Time // Position close time
-	OrderID      string    // Close order ID
-	CloseType    string    // "manual", "stop_loss", "take_profit", "liquidation", "unknown"
-	ExchangeID   string    // Exchange-specific position ID
+	Symbol      string    // Trading pair (e.g., "BTCUSDT")
+	Side        string    // "long" or "short"
+	EntryPrice  float64   // Entry price
+	ExitPrice   float64   // Exit/close price
+	Quantity    float64   // Position size
+	RealizedPnL float64   // Realized profit/loss
+	Fee         float64   // Trading fee/commission
+	Leverage    int       // Leverage used
+	EntryTime   time.Time // Position open time
+	ExitTime    time.Time // Position close time
+	OrderID     string    // Close order ID
+	CloseType   string    // "manual", "stop_loss", "take_profit", "liquidation", "unknown"
+	ExchangeID  string    // Exchange-specific position ID
 }
 
 // TradeRecord represents a single trade/fill from exchange
@@ -115,6 +115,8 @@ type OpenOrder struct {
 	StopPrice    float64 `json:"stop_price"`    // Trigger price (for stop orders)
 	Quantity     float64 `json:"quantity"`
 	Status       string  `json:"status"` // NEW
+	Source       string  `json:"source,omitempty"`
+	LastSyncAt   int64   `json:"last_sync_at,omitempty"`
 }
 
 // OpenOrdersAllGetter is an optional interface for exchanges that can query all open orders at once.
@@ -130,9 +132,9 @@ type LimitOrderRequest struct {
 	Price        float64 `json:"price"`         // Limit price
 	Quantity     float64 `json:"quantity"`
 	Leverage     int     `json:"leverage"`
-	PostOnly     bool    `json:"post_only"`     // Maker only order
-	ReduceOnly   bool    `json:"reduce_only"`   // Reduce position only
-	ClientID     string  `json:"client_id"`     // Client order ID for tracking
+	PostOnly     bool    `json:"post_only"`   // Maker only order
+	ReduceOnly   bool    `json:"reduce_only"` // Reduce position only
+	ClientID     string  `json:"client_id"`   // Client order ID for tracking
 }
 
 // LimitOrderResult represents the result of placing a limit order

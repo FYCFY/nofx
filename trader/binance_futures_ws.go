@@ -139,7 +139,12 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 		totalUnrealized += unrealized
 
 		side := "long"
-		if amount < 0 {
+		sideRaw := strings.ToUpper(string(pos.Side))
+		if sideRaw == "SHORT" {
+			side = "short"
+		} else if sideRaw == "LONG" {
+			side = "long"
+		} else if amount < 0 {
 			side = "short"
 		}
 		lev := 10.0
@@ -148,14 +153,15 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 		}
 
 		positions = append(positions, map[string]interface{}{
-			"symbol":           pos.Symbol,
-			"positionAmt":      amount,
-			"entryPrice":       entryPrice,
-			"markPrice":        markPrice,
-			"unRealizedProfit": unrealized,
-			"leverage":         lev,
-			"liquidationPrice": 0.0,
-			"side":             side,
+			"symbol":               pos.Symbol,
+			"positionAmt":          amount,
+			"entryPrice":           entryPrice,
+			"markPrice":            markPrice,
+			"unRealizedProfit":     unrealized,
+			"leverage":             lev,
+			"liquidationPrice":     0.0,
+			"side":                 side,
+			"position_data_source": "ws_user_stream",
 		})
 		posSnapshots = append(posSnapshots, BinancePositionSnapshot{
 			Symbol:           pos.Symbol,
@@ -166,6 +172,9 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			Leverage:         lev,
 			LiquidationPrice: 0,
 			Side:             side,
+			PositionSideRaw:  sideRaw,
+			DataSource:       "ws_user_stream",
+			LastTruthUpdate:  time.Now().UTC(),
 		})
 	}
 
@@ -195,6 +204,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 		})
 	}
 	t.markAccountStateDirty()
+	t.markPositionStateDirty()
 }
 
 func (t *FuturesTrader) updateFromAccountConfigUpdate(update futures.WsAccountConfigUpdate) {
@@ -216,9 +226,18 @@ func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUp
 		StopPrice:    parseFloatWS(update.StopPrice),
 		Quantity:     parseFloatWS(update.OriginalQty),
 		Status:       string(update.Status),
+		Source:       "ws_user_stream",
+		LastSyncAt:   update.TradeTime,
+	}
+	if order.LastSyncAt <= 0 {
+		order.LastSyncAt = time.Now().UTC().UnixMilli()
 	}
 
 	t.openOrdersMu.Lock()
+	if old, exists := t.openOrders[order.OrderID]; exists && old.LastSyncAt > order.LastSyncAt {
+		t.openOrdersMu.Unlock()
+		return
+	}
 	if isTerminalOrderStatus(order.Status) {
 		delete(t.openOrders, order.OrderID)
 	} else {
@@ -227,6 +246,7 @@ func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUp
 	t.openOrdersCache = time.Now()
 	t.openOrdersMu.Unlock()
 	t.markAccountStateDirty()
+	t.markOrdersStateDirty()
 
 	if strings.ToUpper(string(update.ExecutionType)) != "TRADE" || update.TradeID <= 0 {
 		return
@@ -260,8 +280,14 @@ func (t *FuturesTrader) updateFromAlgoUpdate(update futures.WsAlgoUpdate) {
 		StopPrice:    parseFloatWS(update.TriggerPrice),
 		Quantity:     parseFloatWS(update.Quantity),
 		Status:       update.AlgoStatus,
+		Source:       "ws_user_stream",
+		LastSyncAt:   time.Now().UTC().UnixMilli(),
 	}
 	t.openOrdersMu.Lock()
+	if old, exists := t.openOrders[order.OrderID]; exists && old.LastSyncAt > order.LastSyncAt {
+		t.openOrdersMu.Unlock()
+		return
+	}
 	if isTerminalOrderStatus(order.Status) {
 		delete(t.openOrders, order.OrderID)
 	} else {
@@ -270,6 +296,7 @@ func (t *FuturesTrader) updateFromAlgoUpdate(update futures.WsAlgoUpdate) {
 	t.openOrdersCache = time.Now()
 	t.openOrdersMu.Unlock()
 	t.markAccountStateDirty()
+	t.markOrdersStateDirty()
 }
 
 func extractFuturesBalances(balances []futures.WsBalance) (walletBalance, availableBalance float64) {

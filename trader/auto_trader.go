@@ -2286,9 +2286,10 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		"daily_pnl":       at.dailyPnL,       // Daily P&L
 
 		// Position information
-		"position_count":  len(positions),  // Position count
-		"margin_used":     totalMarginUsed, // Margin used
-		"margin_used_pct": marginUsedPct,   // Margin usage rate
+		"position_count":          len(positions),  // Position count
+		"margin_used":             totalMarginUsed, // Margin used
+		"margin_used_pct":         marginUsedPct,   // Margin usage rate
+		"account_baseline_age_ms": balance["accountBaselineAgeMs"],
 	}, nil
 }
 
@@ -2324,16 +2325,17 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 		pnlPct := calculatePnLPercentage(unrealizedPnl, marginUsed)
 
 		result = append(result, map[string]interface{}{
-			"symbol":             symbol,
-			"side":               side,
-			"entry_price":        entryPrice,
-			"mark_price":         markPrice,
-			"quantity":           quantity,
-			"leverage":           leverage,
-			"unrealized_pnl":     unrealizedPnl,
-			"unrealized_pnl_pct": pnlPct,
-			"liquidation_price":  liquidationPrice,
-			"margin_used":        marginUsed,
+			"symbol":               symbol,
+			"side":                 side,
+			"entry_price":          entryPrice,
+			"mark_price":           markPrice,
+			"quantity":             quantity,
+			"leverage":             leverage,
+			"unrealized_pnl":       unrealizedPnl,
+			"unrealized_pnl_pct":   pnlPct,
+			"liquidation_price":    liquidationPrice,
+			"margin_used":          marginUsed,
+			"position_data_source": pos["position_data_source"],
 		})
 	}
 

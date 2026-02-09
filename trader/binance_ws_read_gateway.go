@@ -29,6 +29,9 @@ type BinancePositionSnapshot struct {
 	Leverage         float64
 	LiquidationPrice float64
 	Side             string
+	PositionSideRaw  string
+	DataSource       string
+	LastTruthUpdate  time.Time
 }
 
 type BinanceAccountSnapshot struct {
@@ -76,6 +79,9 @@ type binanceWsReadGateway struct {
 	depthCache map[string]wsDepthSnapshot
 	depthTime  map[string]time.Time
 	depthSubs  map[string]chan struct{}
+
+	methodMu        sync.RWMutex
+	methodByPurpose map[string]string
 }
 
 type wsDepthSnapshot struct {
@@ -95,17 +101,18 @@ func newBinanceWsReadGateway(futuresClient *futures.Client, spotClient *binance.
 	}
 
 	g := &binanceWsReadGateway{
-		futuresClient: futuresClient,
-		spotClient:    spotClient,
-		isTestnet:     isTestnet,
-		closed:        make(chan struct{}),
-		symbolMeta:    make(map[string]BinanceSymbolMeta),
-		priceCache:    make(map[string]float64),
-		priceTime:     make(map[string]time.Time),
-		priceSubs:     make(map[string]chan struct{}),
-		depthCache:    make(map[string]wsDepthSnapshot),
-		depthTime:     make(map[string]time.Time),
-		depthSubs:     make(map[string]chan struct{}),
+		futuresClient:   futuresClient,
+		spotClient:      spotClient,
+		isTestnet:       isTestnet,
+		closed:          make(chan struct{}),
+		symbolMeta:      make(map[string]BinanceSymbolMeta),
+		priceCache:      make(map[string]float64),
+		priceTime:       make(map[string]time.Time),
+		priceSubs:       make(map[string]chan struct{}),
+		depthCache:      make(map[string]wsDepthSnapshot),
+		depthTime:       make(map[string]time.Time),
+		depthSubs:       make(map[string]chan struct{}),
+		methodByPurpose: make(map[string]string),
 	}
 	g.futuresConnMgr = newWSAPIConnManager(
 		"futures-wsapi",
@@ -133,6 +140,76 @@ func (g *binanceWsReadGateway) waitReady(timeout time.Duration) error {
 	return g.futuresConnMgr.WaitReady(timeout)
 }
 
+func (g *binanceWsReadGateway) rememberMethod(purpose, method string) {
+	if purpose == "" || method == "" {
+		return
+	}
+	g.methodMu.Lock()
+	g.methodByPurpose[purpose] = method
+	g.methodMu.Unlock()
+}
+
+func (g *binanceWsReadGateway) preferredMethod(purpose string) string {
+	g.methodMu.RLock()
+	method := g.methodByPurpose[purpose]
+	g.methodMu.RUnlock()
+	return method
+}
+
+func isWsMethodNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "-32601") ||
+		strings.Contains(msg, "unknown method") ||
+		strings.Contains(msg, "method not found")
+}
+
+func (g *binanceWsReadGateway) callFuturesWs(purpose string, methodCandidates []string, params map[string]interface{}, signed bool, timeout time.Duration) (map[string]interface{}, string, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	if len(methodCandidates) == 0 {
+		return nil, "", fmt.Errorf("ws api methods empty for purpose=%s", purpose)
+	}
+
+	tried := make(map[string]struct{}, len(methodCandidates)+1)
+	ordered := make([]string, 0, len(methodCandidates)+1)
+	if preferred := g.preferredMethod(purpose); preferred != "" {
+		ordered = append(ordered, preferred)
+		tried[preferred] = struct{}{}
+	}
+	for _, m := range methodCandidates {
+		if m == "" {
+			continue
+		}
+		if _, ok := tried[m]; ok {
+			continue
+		}
+		ordered = append(ordered, m)
+		tried[m] = struct{}{}
+	}
+
+	var lastErr error
+	for _, method := range ordered {
+		resp, err := g.futuresConnMgr.Send(method, params, signed, timeout)
+		if err == nil {
+			g.rememberMethod(purpose, method)
+			return resp, method, nil
+		}
+		if isWsMethodNotFound(err) {
+			lastErr = err
+			continue
+		}
+		return nil, method, err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no available ws method for purpose=%s", purpose)
+	}
+	return nil, "", lastErr
+}
+
 func (g *binanceWsReadGateway) getFuturesAccountSnapshot(opts BinanceWsReadOptions) (*BinanceAccountSnapshot, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -140,7 +217,10 @@ func (g *binanceWsReadGateway) getFuturesAccountSnapshot(opts BinanceWsReadOptio
 	}
 
 	v, err, _ := g.accountSF.Do("futures-account", func() (interface{}, error) {
-		resp, callErr := g.futuresConnMgr.Send("v2/account.status", nil, true, timeout)
+		resp, _, callErr := g.callFuturesWs("account_status", []string{
+			"v2/account.status",
+			"account.status",
+		}, nil, true, timeout)
 		if callErr != nil {
 			return nil, callErr
 		}
@@ -148,15 +228,7 @@ func (g *binanceWsReadGateway) getFuturesAccountSnapshot(opts BinanceWsReadOptio
 		if !ok {
 			return nil, fmt.Errorf("futures ws account response missing result")
 		}
-		raw, marshalErr := json.Marshal(resultRaw)
-		if marshalErr != nil {
-			return nil, marshalErr
-		}
-		var info futures.AccountV3
-		if unmarshalErr := json.Unmarshal(raw, &info); unmarshalErr != nil {
-			return nil, unmarshalErr
-		}
-		return buildSnapshotFromWsAccountInfo(info), nil
+		return buildSnapshotFromWsAccountResult(resultRaw), nil
 	})
 	if err != nil {
 		return nil, err
@@ -164,70 +236,86 @@ func (g *binanceWsReadGateway) getFuturesAccountSnapshot(opts BinanceWsReadOptio
 	return v.(*BinanceAccountSnapshot), nil
 }
 
-func buildSnapshotFromWsAccountInfo(info futures.AccountV3) *BinanceAccountSnapshot {
-	wallet := parseFloatWS(info.TotalWalletBalance)
-	available := parseFloatWS(info.AvailableBalance)
-	unrealized := parseFloatWS(info.TotalUnrealizedProfit)
+func buildSnapshotFromWsAccountResult(resultRaw interface{}) *BinanceAccountSnapshot {
+	now := time.Now().UTC()
+	resultMap, ok := resultRaw.(map[string]interface{})
+	if !ok {
+		return &BinanceAccountSnapshot{UpdateTime: now}
+	}
 
-	positions := make([]BinancePositionSnapshot, 0, len(info.Positions))
-	for _, p := range info.Positions {
-		if p == nil {
-			continue
-		}
-		amt := parseFloatWS(p.PositionAmt)
-		if amt == 0 {
-			continue
-		}
-		side := "long"
-		if amt < 0 {
-			side = "short"
-		}
-		notional := parseFloatWS(p.Notional)
-		initialMargin := parseFloatWS(p.InitialMargin)
-		markPrice := 0.0
-		if amt != 0 {
-			markPrice = math.Abs(notional / amt)
-		}
-		unrealized := parseFloatWS(p.UnrealizedProfit)
-		entryPrice := 0.0
-		qty := math.Abs(amt)
-		if qty > 0 && markPrice > 0 {
-			if side == "short" {
-				entryPrice = markPrice + (unrealized / qty)
-			} else {
-				entryPrice = markPrice - (unrealized / qty)
+	wallet := parseAnyFloat(resultMap["totalWalletBalance"])
+	available := parseAnyFloat(resultMap["availableBalance"])
+	unrealized := parseAnyFloat(resultMap["totalUnrealizedProfit"])
+
+	positions := make([]BinancePositionSnapshot, 0)
+	if rows, ok := resultMap["positions"].([]interface{}); ok {
+		positions = make([]BinancePositionSnapshot, 0, len(rows))
+		for _, row := range rows {
+			pos, ok := row.(map[string]interface{})
+			if !ok {
+				continue
 			}
-			if entryPrice < 0 {
-				entryPrice = 0
+			amt := parseAnyFloat(pos["positionAmt"])
+			if amt == 0 {
+				continue
 			}
-		}
-		leverage := 10.0
-		if initialMargin > 0 {
-			leverage = math.Abs(notional / initialMargin)
+			sideRaw := strings.ToUpper(fmt.Sprintf("%v", pos["positionSide"]))
+			side := normalizePositionSide(sideRaw, amt)
+
+			notional := parseAnyFloat(pos["notional"])
+			initialMargin := parseAnyFloat(pos["initialMargin"])
+			unrealizedPos := parseAnyFloat(pos["unrealizedProfit"])
+			entryPrice := parseAnyFloat(pos["entryPrice"])
+			markPrice := parseAnyFloat(pos["markPrice"])
+			leverage := parseAnyFloat(pos["leverage"])
+			liqPrice := parseAnyFloat(pos["liquidationPrice"])
+
+			if markPrice <= 0 && amt != 0 {
+				markPrice = math.Abs(notional / amt)
+			}
+			if leverage <= 0 && initialMargin > 0 {
+				leverage = math.Abs(notional / initialMargin)
+			}
+			if entryPrice <= 0 {
+				qty := math.Abs(amt)
+				if qty > 0 && markPrice > 0 {
+					if side == "short" {
+						entryPrice = markPrice + (unrealizedPos / qty)
+					} else {
+						entryPrice = markPrice - (unrealizedPos / qty)
+					}
+					if entryPrice < 0 {
+						entryPrice = 0
+					}
+				}
+			}
 			if leverage <= 0 {
 				leverage = 10
 			}
+			positions = append(positions, BinancePositionSnapshot{
+				Symbol:           strings.ToUpper(fmt.Sprintf("%v", pos["symbol"])),
+				PositionAmt:      amt,
+				EntryPrice:       entryPrice,
+				MarkPrice:        markPrice,
+				UnRealizedProfit: unrealizedPos,
+				Leverage:         leverage,
+				LiquidationPrice: liqPrice,
+				Side:             side,
+				PositionSideRaw:  sideRaw,
+				DataSource:       "ws_account_status",
+				LastTruthUpdate:  now,
+			})
 		}
-		positions = append(positions, BinancePositionSnapshot{
-			Symbol:           p.Symbol,
-			PositionAmt:      amt,
-			EntryPrice:       entryPrice,
-			MarkPrice:        markPrice,
-			UnRealizedProfit: unrealized,
-			Leverage:         leverage,
-			LiquidationPrice: 0,
-			Side:             side,
-		})
 	}
 
 	return &BinanceAccountSnapshot{
 		TotalWalletBalance:          wallet,
 		AvailableBalance:            available,
 		TotalUnrealizedProfit:       unrealized,
-		TotalOpenOrderInitialMargin: parseFloatWS(info.TotalOpenOrderInitialMargin),
-		TotalPositionInitialMargin:  parseFloatWS(info.TotalPositionInitialMargin),
+		TotalOpenOrderInitialMargin: parseAnyFloat(resultMap["totalOpenOrderInitialMargin"]),
+		TotalPositionInitialMargin:  parseAnyFloat(resultMap["totalPositionInitialMargin"]),
 		Positions:                   positions,
-		UpdateTime:                  time.Now().UTC(),
+		UpdateTime:                  now,
 	}
 }
 
@@ -428,7 +516,9 @@ func (g *binanceWsReadGateway) getOrderStatus(symbol string, orderID int64, time
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	resp, err := g.futuresConnMgr.Send("order.status", map[string]interface{}{
+	resp, _, err := g.callFuturesWs("order_status", []string{
+		"order.status",
+	}, map[string]interface{}{
 		"symbol":  strings.ToUpper(symbol),
 		"orderId": orderID,
 	}, true, timeout)
@@ -459,6 +549,142 @@ func (g *binanceWsReadGateway) getOrderStatus(symbol string, orderID int64, time
 		"updateTime":  int64(parseAnyFloat(resultRaw["updateTime"])),
 		"commission":  0.0,
 	}, nil
+}
+
+func (g *binanceWsReadGateway) getPositionRiskSnapshot(symbol string, timeout time.Duration) ([]BinancePositionSnapshot, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	params := map[string]interface{}{}
+	if strings.TrimSpace(symbol) != "" {
+		params["symbol"] = strings.ToUpper(symbol)
+	}
+	resp, _, err := g.callFuturesWs("position_risk", []string{
+		"v2/positionRisk",
+		"positionRisk",
+		"position.risk",
+		"v2/account.position",
+		"account.position",
+	}, params, true, timeout)
+	if err != nil {
+		return nil, err
+	}
+	resultRaw, ok := resp["result"]
+	if !ok {
+		return nil, fmt.Errorf("position risk response missing result")
+	}
+
+	now := time.Now().UTC()
+	positions := make([]BinancePositionSnapshot, 0)
+	rows, isList := resultRaw.([]interface{})
+	if !isList {
+		// Some methods may return account-like object with positions array.
+		if m, ok := resultRaw.(map[string]interface{}); ok {
+			if v, ok := m["positions"].([]interface{}); ok {
+				rows = v
+				isList = true
+			}
+		}
+	}
+	if !isList {
+		return nil, fmt.Errorf("position risk result format invalid")
+	}
+
+	for _, row := range rows {
+		pos, ok := row.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		amt := parseAnyFloat(pos["positionAmt"])
+		if amt == 0 {
+			continue
+		}
+		sym := strings.ToUpper(fmt.Sprintf("%v", pos["symbol"]))
+		sideRaw := strings.ToUpper(fmt.Sprintf("%v", pos["positionSide"]))
+		side := normalizePositionSide(sideRaw, amt)
+
+		markPrice := parseAnyFloat(pos["markPrice"])
+		entryPrice := parseAnyFloat(pos["entryPrice"])
+		unrealized := parseAnyFloat(pos["unRealizedProfit"])
+		if unrealized == 0 {
+			unrealized = parseAnyFloat(pos["unrealizedProfit"])
+		}
+		leverage := parseAnyFloat(pos["leverage"])
+		liqPrice := parseAnyFloat(pos["liquidationPrice"])
+		notional := parseAnyFloat(pos["notional"])
+		initialMargin := parseAnyFloat(pos["initialMargin"])
+		if leverage <= 0 && initialMargin > 0 {
+			leverage = math.Abs(notional / initialMargin)
+		}
+		if leverage <= 0 {
+			leverage = 10
+		}
+		positions = append(positions, BinancePositionSnapshot{
+			Symbol:           sym,
+			PositionAmt:      amt,
+			EntryPrice:       entryPrice,
+			MarkPrice:        markPrice,
+			UnRealizedProfit: unrealized,
+			Leverage:         leverage,
+			LiquidationPrice: liqPrice,
+			Side:             side,
+			PositionSideRaw:  sideRaw,
+			DataSource:       "ws_position_risk",
+			LastTruthUpdate:  now,
+		})
+	}
+	return positions, nil
+}
+
+func (g *binanceWsReadGateway) getOpenOrdersSnapshot(symbol string, timeout time.Duration) ([]OpenOrder, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	params := map[string]interface{}{}
+	if strings.TrimSpace(symbol) != "" {
+		params["symbol"] = strings.ToUpper(symbol)
+	}
+	resp, method, err := g.callFuturesWs("open_orders", []string{
+		"openOrders.status",
+		"openOrders",
+		"open.orders",
+	}, params, true, timeout)
+	if err != nil {
+		return nil, err
+	}
+	resultRaw, ok := resp["result"]
+	if !ok {
+		return nil, fmt.Errorf("open orders response missing result")
+	}
+	return parseOpenOrdersRows(resultRaw, "ws_"+method), nil
+}
+
+func (g *binanceWsReadGateway) getOpenAlgoOrdersSnapshot(symbol string, timeout time.Duration) ([]OpenOrder, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	params := map[string]interface{}{}
+	if strings.TrimSpace(symbol) != "" {
+		params["symbol"] = strings.ToUpper(symbol)
+	}
+	resp, method, err := g.callFuturesWs("open_algo_orders", []string{
+		"openAlgoOrders.status",
+		"openAlgoOrders",
+		"open.algoOrders",
+		"algo.openOrders",
+	}, params, true, timeout)
+	if err != nil {
+		// Not all environments expose algo query in WS API.
+		if isWsMethodNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	resultRaw, ok := resp["result"]
+	if !ok {
+		return nil, fmt.Errorf("open algo orders response missing result")
+	}
+	return parseOpenOrdersRows(resultRaw, "ws_"+method), nil
 }
 
 func (g *binanceWsReadGateway) ensureMarkPriceStream(symbol string) error {
@@ -648,6 +874,83 @@ func signQuery(secret string, params map[string]interface{}) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(values.Encode()))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func normalizePositionSide(sideRaw string, amt float64) string {
+	switch strings.ToUpper(strings.TrimSpace(sideRaw)) {
+	case "LONG":
+		return "long"
+	case "SHORT":
+		return "short"
+	default:
+		if amt < 0 {
+			return "short"
+		}
+		return "long"
+	}
+}
+
+func parseOpenOrdersRows(resultRaw interface{}, source string) []OpenOrder {
+	rows, ok := resultRaw.([]interface{})
+	if !ok {
+		if m, mapOK := resultRaw.(map[string]interface{}); mapOK {
+			if list, listOK := m["orders"].([]interface{}); listOK {
+				rows = list
+				ok = true
+			}
+		}
+	}
+	if !ok {
+		return nil
+	}
+	out := make([]OpenOrder, 0, len(rows))
+	now := time.Now().UTC().UnixMilli()
+	for _, row := range rows {
+		m, ok := row.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		orderID := fmt.Sprintf("%v", m["orderId"])
+		if orderID == "" || orderID == "<nil>" {
+			orderID = fmt.Sprintf("%v", m["algoId"])
+		}
+		if orderID == "" || orderID == "<nil>" {
+			continue
+		}
+		symbol := strings.ToUpper(fmt.Sprintf("%v", m["symbol"]))
+		status := strings.ToUpper(fmt.Sprintf("%v", m["status"]))
+		if status == "" || status == "<nil>" {
+			status = "NEW"
+		}
+		orderType := strings.ToUpper(fmt.Sprintf("%v", m["type"]))
+		if orderType == "" || orderType == "<nil>" {
+			orderType = strings.ToUpper(fmt.Sprintf("%v", m["orderType"]))
+		}
+		order := OpenOrder{
+			OrderID:      orderID,
+			Symbol:       symbol,
+			Side:         strings.ToUpper(fmt.Sprintf("%v", m["side"])),
+			PositionSide: strings.ToUpper(fmt.Sprintf("%v", m["positionSide"])),
+			Type:         orderType,
+			Price:        parseAnyFloat(m["price"]),
+			StopPrice:    parseAnyFloat(m["stopPrice"]),
+			Quantity:     parseAnyFloat(m["origQty"]),
+			Status:       status,
+			Source:       source,
+			LastSyncAt:   now,
+		}
+		if order.StopPrice <= 0 {
+			order.StopPrice = parseAnyFloat(m["triggerPrice"])
+		}
+		if order.Quantity <= 0 {
+			order.Quantity = parseAnyFloat(m["origQuantity"])
+		}
+		if order.Quantity <= 0 {
+			order.Quantity = parseAnyFloat(m["quantity"])
+		}
+		out = append(out, order)
+	}
+	return out
 }
 
 func parseAnyFloat(v interface{}) float64 {

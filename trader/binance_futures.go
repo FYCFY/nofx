@@ -62,6 +62,18 @@ type FuturesTrader struct {
 	accountDirtyCh       chan struct{}
 	baselineSyncInterval time.Duration
 	baselineHardStaleAge time.Duration
+	ordersRefreshMu      sync.Mutex
+	ordersDirtyMu        sync.Mutex
+	ordersDirtyAt        time.Time
+	ordersDirtyCh        chan struct{}
+	ordersSyncInterval   time.Duration
+	positionRefreshMu    sync.Mutex
+	positionDirtyAt      time.Time
+	positionDirtyCh      chan struct{}
+	positionSyncInterval time.Duration
+	positionTruthMu      sync.RWMutex
+	positionTruthStore   map[string]BinancePositionSnapshot
+	positionTruthUpdated time.Time
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -118,6 +130,34 @@ func (t *FuturesTrader) markAccountStateDirty() {
 	}
 }
 
+func positionTruthKey(symbol, sideRaw string) string {
+	return normalizeBinanceSymbol(symbol) + "|" + strings.ToUpper(strings.TrimSpace(sideRaw))
+}
+
+func (t *FuturesTrader) markOrdersStateDirty() {
+	t.ordersDirtyMu.Lock()
+	t.ordersDirtyAt = time.Now()
+	t.ordersDirtyMu.Unlock()
+	if t.ordersDirtyCh == nil {
+		return
+	}
+	select {
+	case t.ordersDirtyCh <- struct{}{}:
+	default:
+	}
+}
+
+func (t *FuturesTrader) markPositionStateDirty() {
+	t.positionDirtyAt = time.Now()
+	if t.positionDirtyCh == nil {
+		return
+	}
+	select {
+	case t.positionDirtyCh <- struct{}{}:
+	default:
+	}
+}
+
 func (t *FuturesTrader) refreshAccountBaselineWS(reason string) error {
 	t.accountRefreshMu.Lock()
 	defer t.accountRefreshMu.Unlock()
@@ -135,6 +175,85 @@ func (t *FuturesTrader) refreshAccountBaselineWS(reason string) error {
 	t.applyAccountSnapshotToCaches(wsSnap)
 	logger.Infof("🔄 Binance WS account baseline refreshed: reason=%s available=%.4f open_order_margin=%.4f pos_margin=%.4f",
 		reason, wsSnap.AvailableBalance, wsSnap.TotalOpenOrderInitialMargin, wsSnap.TotalPositionInitialMargin)
+	return nil
+}
+
+func (t *FuturesTrader) refreshPositionTruthWS(reason string) error {
+	t.positionRefreshMu.Lock()
+	defer t.positionRefreshMu.Unlock()
+
+	if t.wsGateway == nil {
+		return fmt.Errorf("binance ws gateway not initialized")
+	}
+	positions, err := t.wsGateway.getPositionRiskSnapshot("", 5*time.Second)
+	if err != nil {
+		return err
+	}
+
+	truth := make(map[string]BinancePositionSnapshot, len(positions))
+	for _, p := range positions {
+		sideRaw := strings.ToUpper(strings.TrimSpace(p.PositionSideRaw))
+		if sideRaw == "" {
+			if p.Side == "short" {
+				sideRaw = "SHORT"
+			} else {
+				sideRaw = "LONG"
+			}
+		}
+		p.PositionSideRaw = sideRaw
+		p.DataSource = "ws_position_risk"
+		if p.LastTruthUpdate.IsZero() {
+			p.LastTruthUpdate = time.Now().UTC()
+		}
+		truth[positionTruthKey(p.Symbol, sideRaw)] = p
+		if p.Leverage > 0 {
+			t.setSymbolLeverage(p.Symbol, int(p.Leverage+0.5), "ws_config")
+		}
+	}
+
+	t.positionTruthMu.Lock()
+	t.positionTruthStore = truth
+	t.positionTruthUpdated = time.Now().UTC()
+	t.positionTruthMu.Unlock()
+	logger.Infof("🔄 Binance WS position truth refreshed: reason=%s count=%d", reason, len(truth))
+	return nil
+}
+
+func (t *FuturesTrader) refreshOpenOrdersBaselineWS(reason string) error {
+	t.ordersRefreshMu.Lock()
+	defer t.ordersRefreshMu.Unlock()
+
+	if t.wsGateway == nil {
+		return fmt.Errorf("binance ws gateway not initialized")
+	}
+	regular, err := t.wsGateway.getOpenOrdersSnapshot("", 5*time.Second)
+	if err != nil {
+		return err
+	}
+	algo, err := t.wsGateway.getOpenAlgoOrdersSnapshot("", 5*time.Second)
+	if err != nil {
+		return err
+	}
+
+	merged := make(map[string]OpenOrder, len(regular)+len(algo))
+	for _, ord := range regular {
+		if ord.OrderID == "" {
+			continue
+		}
+		merged[ord.OrderID] = ord
+	}
+	for _, ord := range algo {
+		if ord.OrderID == "" {
+			continue
+		}
+		merged[ord.OrderID] = ord
+	}
+
+	t.openOrdersMu.Lock()
+	t.openOrders = merged
+	t.openOrdersCache = time.Now()
+	t.openOrdersMu.Unlock()
+	logger.Infof("🔄 Binance WS open orders baseline refreshed: reason=%s count=%d", reason, len(merged))
 	return nil
 }
 
@@ -164,6 +283,70 @@ func (t *FuturesTrader) startAccountBaselineSyncLoop() {
 				lastEventRefresh = now
 				if err := t.refreshAccountBaselineWS("event"); err != nil {
 					logger.Infof("⚠️ Binance WS event baseline refresh failed: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+func (t *FuturesTrader) startOrdersBaselineSyncLoop() {
+	if !t.strictWSOnly {
+		return
+	}
+	interval := t.ordersSyncInterval
+	if interval <= 0 {
+		interval = 45 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		lastEventRefresh := time.Time{}
+		for {
+			select {
+			case <-ticker.C:
+				if err := t.refreshOpenOrdersBaselineWS("periodic"); err != nil {
+					logger.Infof("⚠️ Binance WS periodic open orders refresh failed: %v", err)
+				}
+			case <-t.ordersDirtyCh:
+				now := time.Now()
+				if now.Sub(lastEventRefresh) < time.Second {
+					continue
+				}
+				lastEventRefresh = now
+				if err := t.refreshOpenOrdersBaselineWS("event"); err != nil {
+					logger.Infof("⚠️ Binance WS event open orders refresh failed: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+func (t *FuturesTrader) startPositionTruthSyncLoop() {
+	if !t.strictWSOnly {
+		return
+	}
+	interval := t.positionSyncInterval
+	if interval <= 0 {
+		interval = 45 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		lastEventRefresh := time.Time{}
+		for {
+			select {
+			case <-ticker.C:
+				if err := t.refreshPositionTruthWS("periodic"); err != nil {
+					logger.Infof("⚠️ Binance WS periodic position truth refresh failed: %v", err)
+				}
+			case <-t.positionDirtyCh:
+				now := time.Now()
+				if now.Sub(lastEventRefresh) < time.Second {
+					continue
+				}
+				lastEventRefresh = now
+				if err := t.refreshPositionTruthWS("event"); err != nil {
+					logger.Infof("⚠️ Binance WS event position truth refresh failed: %v", err)
 				}
 			}
 		}
@@ -251,6 +434,36 @@ func (t *FuturesTrader) getRealtimeAccountSnapshot() (*RealtimeAccountSnapshot, 
 	return t.realtimeEngine.Snapshot(10 * time.Second)
 }
 
+func (t *FuturesTrader) lookupPositionTruth(symbol, side string) (BinancePositionSnapshot, bool) {
+	t.positionTruthMu.RLock()
+	defer t.positionTruthMu.RUnlock()
+	if len(t.positionTruthStore) == 0 {
+		return BinancePositionSnapshot{}, false
+	}
+	rawSide := strings.ToUpper(strings.TrimSpace(side))
+	if rawSide == "" {
+		rawSide = "BOTH"
+	}
+	if pos, ok := t.positionTruthStore[positionTruthKey(symbol, rawSide)]; ok {
+		return pos, true
+	}
+	if rawSide != "BOTH" {
+		if pos, ok := t.positionTruthStore[positionTruthKey(symbol, "BOTH")]; ok {
+			return pos, true
+		}
+	}
+	return BinancePositionSnapshot{}, false
+}
+
+func (t *FuturesTrader) positionTruthAge() (time.Duration, bool) {
+	t.positionTruthMu.RLock()
+	defer t.positionTruthMu.RUnlock()
+	if t.positionTruthUpdated.IsZero() {
+		return 0, false
+	}
+	return time.Since(t.positionTruthUpdated), true
+}
+
 func (t *FuturesTrader) applyAccountSnapshotToCaches(snap *BinanceAccountSnapshot) {
 	if snap == nil {
 		return
@@ -267,15 +480,20 @@ func (t *FuturesTrader) applyAccountSnapshotToCaches(snap *BinanceAccountSnapsho
 		if p.PositionAmt == 0 {
 			continue
 		}
+		source := p.DataSource
+		if source == "" {
+			source = "ws_account_status"
+		}
 		positions = append(positions, map[string]interface{}{
-			"symbol":           p.Symbol,
-			"positionAmt":      p.PositionAmt,
-			"entryPrice":       p.EntryPrice,
-			"markPrice":        p.MarkPrice,
-			"unRealizedProfit": p.UnRealizedProfit,
-			"leverage":         p.Leverage,
-			"liquidationPrice": p.LiquidationPrice,
-			"side":             p.Side,
+			"symbol":               p.Symbol,
+			"positionAmt":          p.PositionAmt,
+			"entryPrice":           p.EntryPrice,
+			"markPrice":            p.MarkPrice,
+			"unRealizedProfit":     p.UnRealizedProfit,
+			"leverage":             p.Leverage,
+			"liquidationPrice":     p.LiquidationPrice,
+			"side":                 p.Side,
+			"position_data_source": source,
 		})
 	}
 
@@ -329,6 +547,11 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		accountDirtyCh:         make(chan struct{}, 1),
 		baselineSyncInterval:   45 * time.Second,
 		baselineHardStaleAge:   120 * time.Second,
+		ordersDirtyCh:          make(chan struct{}, 1),
+		ordersSyncInterval:     45 * time.Second,
+		positionDirtyCh:        make(chan struct{}, 1),
+		positionSyncInterval:   45 * time.Second,
+		positionTruthStore:     make(map[string]BinancePositionSnapshot),
 	}
 	trader.realtimeEngine = newBinanceRealtimeAccountEngine(trader.wsGateway, trader.realtimeRecalcInterval)
 	trader.realtimeEngine.SetLeverageLookup(func(symbol string) (float64, bool) {
@@ -351,7 +574,11 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		logger.Infof("⚠️ Binance user stream disabled (testnet mode)")
 	}
 	trader.startAccountBaselineSyncLoop()
+	trader.startOrdersBaselineSyncLoop()
+	trader.startPositionTruthSyncLoop()
 	trader.markAccountStateDirty()
+	trader.markOrdersStateDirty()
+	trader.markPositionStateDirty()
 
 	return trader
 }
@@ -571,6 +798,11 @@ func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, a
 // GetPositions gets all positions (with cache)
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	if t.strictWSOnly {
+		if age, ok := t.positionTruthAge(); !ok || age > 20*time.Second {
+			if err := t.refreshPositionTruthWS("on_read"); err != nil {
+				logger.Infof("⚠️ Binance WS on-read position truth refresh failed: %v", err)
+			}
+		}
 		snapshot, err := t.getRealtimeAccountSnapshot()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get positions via websocket: %w", err)
@@ -580,15 +812,46 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 			if p.PositionAmt == 0 {
 				continue
 			}
+			source := "realtime_engine"
+			sideRaw := strings.ToUpper(p.Side)
+			if sideRaw == "LONG" || sideRaw == "SHORT" {
+				sideRaw = sideRaw
+			} else if p.Side == "short" {
+				sideRaw = "SHORT"
+			} else {
+				sideRaw = "LONG"
+			}
+			if truth, ok := t.lookupPositionTruth(p.Symbol, sideRaw); ok {
+				if truth.EntryPrice > 0 {
+					p.EntryPrice = truth.EntryPrice
+				}
+				if truth.MarkPrice > 0 {
+					p.MarkPrice = truth.MarkPrice
+				}
+				if truth.Leverage > 0 {
+					p.Leverage = truth.Leverage
+				}
+				if truth.LiquidationPrice > 0 {
+					p.LiquidationPrice = truth.LiquidationPrice
+				}
+				if truth.Side != "" {
+					p.Side = truth.Side
+				}
+				source = truth.DataSource
+				if source == "" {
+					source = "ws_position_risk"
+				}
+			}
 			result = append(result, map[string]interface{}{
-				"symbol":           p.Symbol,
-				"positionAmt":      p.PositionAmt,
-				"entryPrice":       p.EntryPrice,
-				"markPrice":        p.MarkPrice,
-				"unRealizedProfit": p.UnRealizedProfit,
-				"leverage":         p.Leverage,
-				"liquidationPrice": p.LiquidationPrice,
-				"side":             p.Side,
+				"symbol":               p.Symbol,
+				"positionAmt":          p.PositionAmt,
+				"entryPrice":           p.EntryPrice,
+				"markPrice":            p.MarkPrice,
+				"unRealizedProfit":     p.UnRealizedProfit,
+				"leverage":             p.Leverage,
+				"liquidationPrice":     p.LiquidationPrice,
+				"side":                 p.Side,
+				"position_data_source": source,
 			})
 		}
 
@@ -1363,6 +1626,15 @@ func (t *FuturesTrader) CancelStopOrders(symbol string) error {
 // GetOpenOrders gets all open/pending orders for a symbol
 func (t *FuturesTrader) GetOpenOrders(symbol string) ([]OpenOrder, error) {
 	if t.strictWSOnly {
+		t.openOrdersMu.RLock()
+		cacheAge := time.Since(t.openOrdersCache)
+		cacheCount := len(t.openOrders)
+		t.openOrdersMu.RUnlock()
+		if cacheCount == 0 || cacheAge > 45*time.Second {
+			if err := t.refreshOpenOrdersBaselineWS("on_read"); err != nil {
+				logger.Infof("⚠️ Binance WS on-read open orders refresh failed: %v", err)
+			}
+		}
 		t.openOrdersMu.RLock()
 		defer t.openOrdersMu.RUnlock()
 		result := make([]OpenOrder, 0, len(t.openOrders))
