@@ -186,6 +186,19 @@ func buildSnapshotFromWsAccountInfo(info futures.AccountV3) *BinanceAccountSnaps
 		if amt != 0 {
 			markPrice = math.Abs(notional / amt)
 		}
+		unrealized := parseFloatWS(p.UnrealizedProfit)
+		entryPrice := 0.0
+		qty := math.Abs(amt)
+		if qty > 0 && markPrice > 0 {
+			if side == "short" {
+				entryPrice = markPrice + (unrealized / qty)
+			} else {
+				entryPrice = markPrice - (unrealized / qty)
+			}
+			if entryPrice < 0 {
+				entryPrice = 0
+			}
+		}
 		leverage := 10.0
 		if initialMargin > 0 {
 			leverage = math.Abs(notional / initialMargin)
@@ -196,9 +209,9 @@ func buildSnapshotFromWsAccountInfo(info futures.AccountV3) *BinanceAccountSnaps
 		positions = append(positions, BinancePositionSnapshot{
 			Symbol:           p.Symbol,
 			PositionAmt:      amt,
-			EntryPrice:       0,
+			EntryPrice:       entryPrice,
 			MarkPrice:        markPrice,
-			UnRealizedProfit: parseFloatWS(p.UnrealizedProfit),
+			UnRealizedProfit: unrealized,
 			Leverage:         leverage,
 			LiquidationPrice: 0,
 			Side:             side,
@@ -278,6 +291,18 @@ func (g *binanceWsReadGateway) getMarketPrice(symbol string, timeout time.Durati
 		}
 		time.Sleep(120 * time.Millisecond)
 	}
+}
+
+func (g *binanceWsReadGateway) getCachedMarkPrice(symbol string) (float64, time.Time, bool) {
+	symbol = strings.ToUpper(symbol)
+	g.priceMu.RLock()
+	price, ok := g.priceCache[symbol]
+	ts := g.priceTime[symbol]
+	g.priceMu.RUnlock()
+	if !ok || price <= 0 {
+		return 0, time.Time{}, false
+	}
+	return price, ts, true
 }
 
 func (g *binanceWsReadGateway) getOrderBook(symbol string, depth, limit int, timeout time.Duration) ([][]float64, [][]float64, error) {

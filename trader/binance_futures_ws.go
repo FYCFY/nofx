@@ -116,6 +116,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 	walletBalance, availableBalance := extractFuturesBalances(update.Balances)
 
 	var positions []map[string]interface{}
+	posSnapshots := make([]BinancePositionSnapshot, 0, len(update.Positions))
 	totalUnrealized := 0.0
 	for _, pos := range update.Positions {
 		amount := parseFloatWS(pos.Amount)
@@ -139,8 +140,19 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			"entryPrice":       entryPrice,
 			"markPrice":        markPrice,
 			"unRealizedProfit": unrealized,
+			"leverage":         10.0,
 			"liquidationPrice": 0.0,
 			"side":             side,
+		})
+		posSnapshots = append(posSnapshots, BinancePositionSnapshot{
+			Symbol:           pos.Symbol,
+			PositionAmt:      amount,
+			EntryPrice:       entryPrice,
+			MarkPrice:        markPrice,
+			UnRealizedProfit: unrealized,
+			Leverage:         10.0,
+			LiquidationPrice: 0,
+			Side:             side,
 		})
 	}
 
@@ -159,6 +171,16 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 	t.cachedPositions = positions
 	t.positionsCacheTime = time.Now()
 	t.positionsCacheMutex.Unlock()
+
+	if t.realtimeEngine != nil {
+		t.realtimeEngine.SetBaselineFromAccountSnapshot(&BinanceAccountSnapshot{
+			TotalWalletBalance:    walletBalance,
+			AvailableBalance:      availableBalance,
+			TotalUnrealizedProfit: totalUnrealized,
+			Positions:             posSnapshots,
+			UpdateTime:            time.Now().UTC(),
+		})
+	}
 }
 
 func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUpdate) {
@@ -199,6 +221,10 @@ func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUp
 		Time:         time.UnixMilli(update.TradeTime).UTC(),
 	}
 	t.appendWsTrade(trade)
+
+	if t.realtimeEngine != nil {
+		_ = t.realtimeEngine.EnsureSymbol(update.Symbol)
+	}
 }
 
 func (t *FuturesTrader) updateFromAlgoUpdate(update futures.WsAlgoUpdate) {

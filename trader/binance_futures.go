@@ -52,6 +52,7 @@ type FuturesTrader struct {
 	userStreamEnabled bool
 	strictWSOnly      bool
 	wsGateway         *binanceWsReadGateway
+	realtimeEngine    *BinanceRealtimeAccountEngine
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -65,6 +66,8 @@ type FuturesTrader struct {
 
 	// Cache validity period (15 seconds)
 	cacheDuration time.Duration
+	// Realtime account recalculation interval.
+	realtimeRecalcInterval time.Duration
 
 	// User data stream (WebSocket) state
 	userStreamMu        sync.RWMutex
@@ -91,6 +94,24 @@ func (t *FuturesTrader) fetchAccountSnapshotWS() (*BinanceAccountSnapshot, error
 		return nil, fmt.Errorf("binance ws api not ready: %w", err)
 	}
 	return t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+}
+
+func (t *FuturesTrader) getRealtimeAccountSnapshot() (*RealtimeAccountSnapshot, error) {
+	if t.realtimeEngine == nil {
+		return nil, fmt.Errorf("binance realtime account engine not initialized")
+	}
+	snap, err := t.realtimeEngine.Snapshot(10 * time.Second)
+	if err == nil {
+		return snap, nil
+	}
+
+	// Cold start or stale snapshot: refresh baseline from WS API, then retry once.
+	wsSnap, wsErr := t.fetchAccountSnapshotWS()
+	if wsErr != nil {
+		return nil, fmt.Errorf("%v; refresh baseline failed: %w", err, wsErr)
+	}
+	t.realtimeEngine.SetBaselineFromAccountSnapshot(wsSnap)
+	return t.realtimeEngine.Snapshot(10 * time.Second)
 }
 
 func (t *FuturesTrader) applyAccountSnapshotToCaches(snap *BinanceAccountSnapshot) {
@@ -131,6 +152,10 @@ func (t *FuturesTrader) applyAccountSnapshotToCaches(snap *BinanceAccountSnapsho
 	t.cachedPositions = positions
 	t.positionsCacheTime = now
 	t.positionsCacheMutex.Unlock()
+
+	if t.realtimeEngine != nil {
+		t.realtimeEngine.SetBaselineFromAccountSnapshot(snap)
+	}
 }
 
 // NewFuturesTrader creates futures trader
@@ -151,17 +176,19 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 	syncBinanceServerTime(client)
 	syncBinanceServerTimeSpot(spotClient)
 	trader := &FuturesTrader{
-		client:            client,
-		spotClient:        spotClient,
-		cacheDuration:     15 * time.Second, // 15-second cache
-		isTestnet:         testnet,
-		userStreamEnabled: !testnet,
-		strictWSOnly:      true,
-		wsGateway:         newBinanceWsReadGateway(client, spotClient, testnet),
-		openOrders:        make(map[string]OpenOrder),
-		wsTradeSeen:       make(map[string]struct{}),
-		wsTradesMaxSize:   4000,
+		client:                 client,
+		spotClient:             spotClient,
+		cacheDuration:          15 * time.Second, // 15-second cache
+		realtimeRecalcInterval: 3 * time.Second,
+		isTestnet:              testnet,
+		userStreamEnabled:      !testnet,
+		strictWSOnly:           true,
+		wsGateway:              newBinanceWsReadGateway(client, spotClient, testnet),
+		openOrders:             make(map[string]OpenOrder),
+		wsTradeSeen:            make(map[string]struct{}),
+		wsTradesMaxSize:        4000,
 	}
+	trader.realtimeEngine = newBinanceRealtimeAccountEngine(trader.wsGateway, trader.realtimeRecalcInterval)
 
 	// Set dual-side position mode (Hedge Mode)
 	// This is required because the code uses PositionSide (LONG/SHORT)
@@ -231,24 +258,22 @@ func syncBinanceServerTimeSpot(client *binance.Client) {
 // GetBalance gets account balance (with cache)
 func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	if t.strictWSOnly {
-		// Prefer stream-updated cache first.
-		t.balanceCacheMutex.RLock()
-		if t.cachedBalance != nil && (t.isUserStreamFresh() || time.Since(t.balanceCacheTime) < 5*time.Minute) {
-			cached := t.cachedBalance
-			t.balanceCacheMutex.RUnlock()
-			return cached, nil
-		}
-		t.balanceCacheMutex.RUnlock()
-
-		snap, err := t.fetchAccountSnapshotWS()
+		snapshot, err := t.getRealtimeAccountSnapshot()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get account info via websocket: %w", err)
 		}
-		t.applyAccountSnapshotToCaches(snap)
+		result := map[string]interface{}{
+			"totalWalletBalance":    snapshot.TotalWalletBalance,
+			"availableBalance":      snapshot.AvailableBalance,
+			"totalUnrealizedProfit": snapshot.TotalUnrealizedProfit,
+			"totalEquity":           snapshot.TotalEquity,
+		}
 
-		t.balanceCacheMutex.RLock()
-		result := t.cachedBalance
-		t.balanceCacheMutex.RUnlock()
+		t.balanceCacheMutex.Lock()
+		t.cachedBalance = result
+		t.balanceCacheTime = snapshot.UpdatedAt
+		t.balanceCacheMutex.Unlock()
+
 		return result, nil
 	}
 
@@ -388,23 +413,31 @@ func (t *FuturesTrader) transferUSDT(transferType binance.FuturesTransferType, a
 // GetPositions gets all positions (with cache)
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	if t.strictWSOnly {
-		t.positionsCacheMutex.RLock()
-		if t.cachedPositions != nil && (t.isUserStreamFresh() || time.Since(t.positionsCacheTime) < 5*time.Minute) {
-			cached := t.cachedPositions
-			t.positionsCacheMutex.RUnlock()
-			return cached, nil
-		}
-		t.positionsCacheMutex.RUnlock()
-
-		snap, err := t.fetchAccountSnapshotWS()
+		snapshot, err := t.getRealtimeAccountSnapshot()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get positions via websocket: %w", err)
 		}
-		t.applyAccountSnapshotToCaches(snap)
+		result := make([]map[string]interface{}, 0, len(snapshot.Positions))
+		for _, p := range snapshot.Positions {
+			if p.PositionAmt == 0 {
+				continue
+			}
+			result = append(result, map[string]interface{}{
+				"symbol":           p.Symbol,
+				"positionAmt":      p.PositionAmt,
+				"entryPrice":       p.EntryPrice,
+				"markPrice":        p.MarkPrice,
+				"unRealizedProfit": p.UnRealizedProfit,
+				"leverage":         p.Leverage,
+				"liquidationPrice": p.LiquidationPrice,
+				"side":             p.Side,
+			})
+		}
 
-		t.positionsCacheMutex.RLock()
-		result := t.cachedPositions
-		t.positionsCacheMutex.RUnlock()
+		t.positionsCacheMutex.Lock()
+		t.cachedPositions = result
+		t.positionsCacheTime = snapshot.UpdatedAt
+		t.positionsCacheMutex.Unlock()
 		return result, nil
 	}
 
