@@ -32,11 +32,13 @@ type BinancePositionSnapshot struct {
 }
 
 type BinanceAccountSnapshot struct {
-	TotalWalletBalance    float64
-	AvailableBalance      float64
-	TotalUnrealizedProfit float64
-	Positions             []BinancePositionSnapshot
-	UpdateTime            time.Time
+	TotalWalletBalance          float64
+	AvailableBalance            float64
+	TotalUnrealizedProfit       float64
+	TotalOpenOrderInitialMargin float64
+	TotalPositionInitialMargin  float64
+	Positions                   []BinancePositionSnapshot
+	UpdateTime                  time.Time
 }
 
 type BinanceWsReadOptions struct {
@@ -219,11 +221,13 @@ func buildSnapshotFromWsAccountInfo(info futures.AccountV3) *BinanceAccountSnaps
 	}
 
 	return &BinanceAccountSnapshot{
-		TotalWalletBalance:    wallet,
-		AvailableBalance:      available,
-		TotalUnrealizedProfit: unrealized,
-		Positions:             positions,
-		UpdateTime:            time.Now().UTC(),
+		TotalWalletBalance:          wallet,
+		AvailableBalance:            available,
+		TotalUnrealizedProfit:       unrealized,
+		TotalOpenOrderInitialMargin: parseFloatWS(info.TotalOpenOrderInitialMargin),
+		TotalPositionInitialMargin:  parseFloatWS(info.TotalPositionInitialMargin),
+		Positions:                   positions,
+		UpdateTime:                  time.Now().UTC(),
 	}
 }
 

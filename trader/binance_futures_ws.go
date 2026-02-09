@@ -116,6 +116,13 @@ func (t *FuturesTrader) handleUserStreamEvent(event *futures.WsUserDataEvent) {
 
 func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) {
 	walletBalance, availableBalance := extractFuturesBalances(update.Balances)
+	if t.realtimeEngine != nil {
+		if avail, ok := t.realtimeEngine.BaselineAvailable(); ok {
+			// ACCOUNT_UPDATE does not reliably carry current available balance including open-order margin.
+			// Keep last ws-api baseline value until event-triggered account.status refresh lands.
+			availableBalance = avail
+		}
+	}
 
 	var positions []map[string]interface{}
 	posSnapshots := make([]BinancePositionSnapshot, 0, len(update.Positions))
@@ -187,6 +194,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			UpdateTime:            time.Now().UTC(),
 		})
 	}
+	t.markAccountStateDirty()
 }
 
 func (t *FuturesTrader) updateFromAccountConfigUpdate(update futures.WsAccountConfigUpdate) {
@@ -218,6 +226,7 @@ func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUp
 	}
 	t.openOrdersCache = time.Now()
 	t.openOrdersMu.Unlock()
+	t.markAccountStateDirty()
 
 	if strings.ToUpper(string(update.ExecutionType)) != "TRADE" || update.TradeID <= 0 {
 		return
@@ -260,6 +269,7 @@ func (t *FuturesTrader) updateFromAlgoUpdate(update futures.WsAlgoUpdate) {
 	}
 	t.openOrdersCache = time.Now()
 	t.openOrdersMu.Unlock()
+	t.markAccountStateDirty()
 }
 
 func extractFuturesBalances(balances []futures.WsBalance) (walletBalance, availableBalance float64) {

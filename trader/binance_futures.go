@@ -46,16 +46,22 @@ func getBrOrderID() string {
 
 // FuturesTrader Binance futures trader
 type FuturesTrader struct {
-	client            *futures.Client
-	spotClient        *binance.Client
-	isTestnet         bool
-	userStreamEnabled bool
-	strictWSOnly      bool
-	wsGateway         *binanceWsReadGateway
-	realtimeEngine    *BinanceRealtimeAccountEngine
-	symbolLeverage    map[string]int
-	symbolLevSource   map[string]string
-	symbolLeverageMu  sync.RWMutex
+	client               *futures.Client
+	spotClient           *binance.Client
+	isTestnet            bool
+	userStreamEnabled    bool
+	strictWSOnly         bool
+	wsGateway            *binanceWsReadGateway
+	realtimeEngine       *BinanceRealtimeAccountEngine
+	symbolLeverage       map[string]int
+	symbolLevSource      map[string]string
+	symbolLeverageMu     sync.RWMutex
+	accountRefreshMu     sync.Mutex
+	accountDirtyMu       sync.Mutex
+	accountDirtyAt       time.Time
+	accountDirtyCh       chan struct{}
+	baselineSyncInterval time.Duration
+	baselineHardStaleAge time.Duration
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -97,6 +103,71 @@ func (t *FuturesTrader) fetchAccountSnapshotWS() (*BinanceAccountSnapshot, error
 		return nil, fmt.Errorf("binance ws api not ready: %w", err)
 	}
 	return t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
+}
+
+func (t *FuturesTrader) markAccountStateDirty() {
+	t.accountDirtyMu.Lock()
+	t.accountDirtyAt = time.Now()
+	t.accountDirtyMu.Unlock()
+	if t.accountDirtyCh == nil {
+		return
+	}
+	select {
+	case t.accountDirtyCh <- struct{}{}:
+	default:
+	}
+}
+
+func (t *FuturesTrader) refreshAccountBaselineWS(reason string) error {
+	t.accountRefreshMu.Lock()
+	defer t.accountRefreshMu.Unlock()
+
+	wsSnap, err := t.fetchAccountSnapshotWS()
+	if err != nil {
+		return err
+	}
+	for i := range wsSnap.Positions {
+		symbol := wsSnap.Positions[i].Symbol
+		if lev, ok := t.getSymbolLeverage(symbol); ok {
+			wsSnap.Positions[i].Leverage = float64(lev)
+		}
+	}
+	t.applyAccountSnapshotToCaches(wsSnap)
+	logger.Infof("🔄 Binance WS account baseline refreshed: reason=%s available=%.4f open_order_margin=%.4f pos_margin=%.4f",
+		reason, wsSnap.AvailableBalance, wsSnap.TotalOpenOrderInitialMargin, wsSnap.TotalPositionInitialMargin)
+	return nil
+}
+
+func (t *FuturesTrader) startAccountBaselineSyncLoop() {
+	if !t.strictWSOnly {
+		return
+	}
+	interval := t.baselineSyncInterval
+	if interval <= 0 {
+		interval = 45 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		lastEventRefresh := time.Time{}
+		for {
+			select {
+			case <-ticker.C:
+				if err := t.refreshAccountBaselineWS("periodic"); err != nil {
+					logger.Infof("⚠️ Binance WS periodic baseline refresh failed: %v", err)
+				}
+			case <-t.accountDirtyCh:
+				now := time.Now()
+				if now.Sub(lastEventRefresh) < time.Second {
+					continue
+				}
+				lastEventRefresh = now
+				if err := t.refreshAccountBaselineWS("event"); err != nil {
+					logger.Infof("⚠️ Binance WS event baseline refresh failed: %v", err)
+				}
+			}
+		}
+	}()
 }
 
 func normalizeBinanceSymbol(symbol string) string {
@@ -156,27 +227,27 @@ func (t *FuturesTrader) getRealtimeAccountSnapshot() (*RealtimeAccountSnapshot, 
 	if t.realtimeEngine == nil {
 		return nil, fmt.Errorf("binance realtime account engine not initialized")
 	}
+	if age, ok := t.realtimeEngine.BaselineAge(); !ok || age > 45*time.Second {
+		if err := t.refreshAccountBaselineWS("on_read"); err != nil {
+			logger.Infof("⚠️ Binance WS on-read baseline refresh failed: %v", err)
+		}
+	}
+
 	snap, err := t.realtimeEngine.Snapshot(10 * time.Second)
 	if err == nil {
+		if age, ok := t.realtimeEngine.BaselineAge(); ok && age > t.baselineHardStaleAge {
+			if err := t.refreshAccountBaselineWS("stale_guard"); err != nil {
+				return nil, fmt.Errorf("realtime account baseline too old (%s): %w", age.Truncate(time.Millisecond), err)
+			}
+			return t.realtimeEngine.Snapshot(10 * time.Second)
+		}
 		return snap, nil
 	}
 
 	// Cold start or stale snapshot: refresh baseline from WS API, then retry once.
-	wsSnap, wsErr := t.fetchAccountSnapshotWS()
-	if wsErr != nil {
+	if wsErr := t.refreshAccountBaselineWS("cold_start"); wsErr != nil {
 		return nil, fmt.Errorf("%v; refresh baseline failed: %w", err, wsErr)
 	}
-	for i := range wsSnap.Positions {
-		symbol := wsSnap.Positions[i].Symbol
-		if lev, ok := t.getSymbolLeverage(symbol); ok {
-			wsSnap.Positions[i].Leverage = float64(lev)
-			continue
-		}
-		// Do not trust account.status derived leverage (notional/initialMargin) as truth.
-		// Keep a safe display default until ws_config/store/api_set truth is available.
-		wsSnap.Positions[i].Leverage = 10
-	}
-	t.realtimeEngine.SetBaselineFromAccountSnapshot(wsSnap)
 	return t.realtimeEngine.Snapshot(10 * time.Second)
 }
 
@@ -255,6 +326,9 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		openOrders:             make(map[string]OpenOrder),
 		wsTradeSeen:            make(map[string]struct{}),
 		wsTradesMaxSize:        4000,
+		accountDirtyCh:         make(chan struct{}, 1),
+		baselineSyncInterval:   45 * time.Second,
+		baselineHardStaleAge:   120 * time.Second,
 	}
 	trader.realtimeEngine = newBinanceRealtimeAccountEngine(trader.wsGateway, trader.realtimeRecalcInterval)
 	trader.realtimeEngine.SetLeverageLookup(func(symbol string) (float64, bool) {
@@ -276,6 +350,8 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 	} else {
 		logger.Infof("⚠️ Binance user stream disabled (testnet mode)")
 	}
+	trader.startAccountBaselineSyncLoop()
+	trader.markAccountStateDirty()
 
 	return trader
 }
@@ -336,12 +412,20 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get account info via websocket: %w", err)
 		}
-		result := map[string]interface{}{
-			"totalWalletBalance":    snapshot.TotalWalletBalance,
-			"availableBalance":      snapshot.AvailableBalance,
-			"totalUnrealizedProfit": snapshot.TotalUnrealizedProfit,
-			"totalEquity":           snapshot.TotalEquity,
+		baselineAgeMs := int64(0)
+		if age, ok := t.realtimeEngine.BaselineAge(); ok {
+			baselineAgeMs = age.Milliseconds()
 		}
+		result := map[string]interface{}{
+			"totalWalletBalance":     snapshot.TotalWalletBalance,
+			"availableBalance":       snapshot.AvailableBalance,
+			"totalUnrealizedProfit":  snapshot.TotalUnrealizedProfit,
+			"totalEquity":            snapshot.TotalEquity,
+			"availableBalanceSource": "ws_api_baseline",
+			"accountBaselineAgeMs":   baselineAgeMs,
+		}
+		logger.Infof("📊 Binance account snapshot: available_balance_source=ws_api_baseline account_baseline_age_ms=%d stale=%v",
+			baselineAgeMs, snapshot.Stale)
 
 		t.balanceCacheMutex.Lock()
 		t.cachedBalance = result

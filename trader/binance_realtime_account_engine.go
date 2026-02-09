@@ -34,16 +34,18 @@ type BinanceRealtimeAccountEngine struct {
 
 	recalcInterval time.Duration
 	maxStaleAge    time.Duration
+	baselineMaxAge time.Duration
 	leverageLookup func(symbol string) (float64, bool)
 
 	mu sync.RWMutex
 
-	hasBaseline       bool
-	baselineWallet    float64
-	baselineAvailable float64
-	baselineUnreal    float64
-	baselinePositions map[string]RealtimePosition
-	lastSnapshot      RealtimeAccountSnapshot
+	hasBaseline         bool
+	baselineWallet      float64
+	baselineAvailable   float64
+	baselineUnreal      float64
+	baselinePositions   map[string]RealtimePosition
+	lastBaselineRefresh time.Time
+	lastSnapshot        RealtimeAccountSnapshot
 
 	stopCh chan struct{}
 }
@@ -56,6 +58,7 @@ func newBinanceRealtimeAccountEngine(gateway *binanceWsReadGateway, recalcInterv
 		gateway:           gateway,
 		recalcInterval:    recalcInterval,
 		maxStaleAge:       10 * time.Second,
+		baselineMaxAge:    45 * time.Second,
 		baselinePositions: make(map[string]RealtimePosition),
 		stopCh:            make(chan struct{}),
 	}
@@ -128,6 +131,10 @@ func (e *BinanceRealtimeAccountEngine) SetBaselineFromAccountSnapshot(snap *Bina
 	e.baselineAvailable = snap.AvailableBalance
 	e.baselineUnreal = snap.TotalUnrealizedProfit
 	e.baselinePositions = positions
+	e.lastBaselineRefresh = snap.UpdateTime
+	if e.lastBaselineRefresh.IsZero() {
+		e.lastBaselineRefresh = time.Now().UTC()
+	}
 	e.mu.Unlock()
 
 	for symbol := range positions {
@@ -201,9 +208,10 @@ func (e *BinanceRealtimeAccountEngine) recalculate() {
 
 	sort.Slice(positions, func(i, j int) bool { return positions[i].Symbol < positions[j].Symbol })
 
-	available := e.baselineAvailable + (totalUnrealized - e.baselineUnreal)
-	if available < 0 {
-		available = 0
+	available := e.baselineAvailable
+	baselineAge := time.Since(e.lastBaselineRefresh)
+	if baselineAge > e.baselineMaxAge {
+		stale = true
 	}
 
 	e.lastSnapshot = RealtimeAccountSnapshot{
@@ -215,6 +223,24 @@ func (e *BinanceRealtimeAccountEngine) recalculate() {
 		UpdatedAt:             time.Now().UTC(),
 		Stale:                 stale,
 	}
+}
+
+func (e *BinanceRealtimeAccountEngine) BaselineAge() (time.Duration, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if !e.hasBaseline || e.lastBaselineRefresh.IsZero() {
+		return 0, false
+	}
+	return time.Since(e.lastBaselineRefresh), true
+}
+
+func (e *BinanceRealtimeAccountEngine) BaselineAvailable() (float64, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if !e.hasBaseline {
+		return 0, false
+	}
+	return e.baselineAvailable, true
 }
 
 func (e *BinanceRealtimeAccountEngine) Snapshot(maxAge time.Duration) (*RealtimeAccountSnapshot, error) {
