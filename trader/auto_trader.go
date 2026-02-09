@@ -321,6 +321,15 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 					if p == nil || p.Leverage <= 0 || p.Symbol == "" {
 						continue
 					}
+					// Ignore sync-rebuilt positions with placeholder leverage (often 1x).
+					if strings.EqualFold(p.Source, "sync") {
+						continue
+					}
+					// For Binance futures, 1x from local seed is usually placeholder/noise.
+					// Keep leverage truth from ws config/api set events instead.
+					if p.Leverage <= 1 {
+						continue
+					}
 					seed[p.Symbol] = p.Leverage
 				}
 				binanceTrader.SeedSymbolLeverage(seed)

@@ -109,8 +109,6 @@ func leverageSourcePriority(source string) int {
 		return 3
 	case "store":
 		return 2
-	case "ws_estimated":
-		return 1
 	default:
 		return 0
 	}
@@ -168,17 +166,15 @@ func (t *FuturesTrader) getRealtimeAccountSnapshot() (*RealtimeAccountSnapshot, 
 	if wsErr != nil {
 		return nil, fmt.Errorf("%v; refresh baseline failed: %w", err, wsErr)
 	}
-	for _, p := range wsSnap.Positions {
-		if p.Leverage <= 0 {
+	for i := range wsSnap.Positions {
+		symbol := wsSnap.Positions[i].Symbol
+		if lev, ok := t.getSymbolLeverage(symbol); ok {
+			wsSnap.Positions[i].Leverage = float64(lev)
 			continue
 		}
-		if _, ok := t.getSymbolLeverage(p.Symbol); ok {
-			continue
-		}
-		estimatedLev := int(p.Leverage + 0.5)
-		if estimatedLev > 0 {
-			t.setSymbolLeverage(p.Symbol, estimatedLev, "ws_estimated")
-		}
+		// Do not trust account.status derived leverage (notional/initialMargin) as truth.
+		// Keep a safe display default until ws_config/store/api_set truth is available.
+		wsSnap.Positions[i].Leverage = 10
 	}
 	t.realtimeEngine.SetBaselineFromAccountSnapshot(wsSnap)
 	return t.realtimeEngine.Snapshot(10 * time.Second)
