@@ -53,6 +53,9 @@ type FuturesTrader struct {
 	strictWSOnly      bool
 	wsGateway         *binanceWsReadGateway
 	realtimeEngine    *BinanceRealtimeAccountEngine
+	symbolLeverage    map[string]int
+	symbolLevSource   map[string]string
+	symbolLeverageMu  sync.RWMutex
 
 	// Balance cache
 	cachedBalance     map[string]interface{}
@@ -96,6 +99,61 @@ func (t *FuturesTrader) fetchAccountSnapshotWS() (*BinanceAccountSnapshot, error
 	return t.wsGateway.getFuturesAccountSnapshot(BinanceWsReadOptions{Timeout: 5 * time.Second})
 }
 
+func normalizeBinanceSymbol(symbol string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol))
+}
+
+func leverageSourcePriority(source string) int {
+	switch source {
+	case "ws_config", "api_set":
+		return 3
+	case "store":
+		return 2
+	case "ws_estimated":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (t *FuturesTrader) setSymbolLeverage(symbol string, lev int, source string) {
+	if lev <= 0 {
+		return
+	}
+	symbol = normalizeBinanceSymbol(symbol)
+	if symbol == "" {
+		return
+	}
+	t.symbolLeverageMu.Lock()
+	defer t.symbolLeverageMu.Unlock()
+	existingSource := t.symbolLevSource[symbol]
+	if leverageSourcePriority(source) < leverageSourcePriority(existingSource) {
+		return
+	}
+	t.symbolLeverage[symbol] = lev
+	t.symbolLevSource[symbol] = source
+}
+
+func (t *FuturesTrader) getSymbolLeverage(symbol string) (int, bool) {
+	symbol = normalizeBinanceSymbol(symbol)
+	if symbol == "" {
+		return 0, false
+	}
+	t.symbolLeverageMu.RLock()
+	lev, ok := t.symbolLeverage[symbol]
+	t.symbolLeverageMu.RUnlock()
+	return lev, ok && lev > 0
+}
+
+func (t *FuturesTrader) SeedSymbolLeverage(seed map[string]int) {
+	if len(seed) == 0 {
+		return
+	}
+	for sym, lev := range seed {
+		t.setSymbolLeverage(sym, lev, "store")
+	}
+}
+
 func (t *FuturesTrader) getRealtimeAccountSnapshot() (*RealtimeAccountSnapshot, error) {
 	if t.realtimeEngine == nil {
 		return nil, fmt.Errorf("binance realtime account engine not initialized")
@@ -109,6 +167,18 @@ func (t *FuturesTrader) getRealtimeAccountSnapshot() (*RealtimeAccountSnapshot, 
 	wsSnap, wsErr := t.fetchAccountSnapshotWS()
 	if wsErr != nil {
 		return nil, fmt.Errorf("%v; refresh baseline failed: %w", err, wsErr)
+	}
+	for _, p := range wsSnap.Positions {
+		if p.Leverage <= 0 {
+			continue
+		}
+		if _, ok := t.getSymbolLeverage(p.Symbol); ok {
+			continue
+		}
+		estimatedLev := int(p.Leverage + 0.5)
+		if estimatedLev > 0 {
+			t.setSymbolLeverage(p.Symbol, estimatedLev, "ws_estimated")
+		}
 	}
 	t.realtimeEngine.SetBaselineFromAccountSnapshot(wsSnap)
 	return t.realtimeEngine.Snapshot(10 * time.Second)
@@ -184,11 +254,19 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, testnet bool) *Fu
 		userStreamEnabled:      !testnet,
 		strictWSOnly:           true,
 		wsGateway:              newBinanceWsReadGateway(client, spotClient, testnet),
+		symbolLeverage:         make(map[string]int),
+		symbolLevSource:        make(map[string]string),
 		openOrders:             make(map[string]OpenOrder),
 		wsTradeSeen:            make(map[string]struct{}),
 		wsTradesMaxSize:        4000,
 	}
 	trader.realtimeEngine = newBinanceRealtimeAccountEngine(trader.wsGateway, trader.realtimeRecalcInterval)
+	trader.realtimeEngine.SetLeverageLookup(func(symbol string) (float64, bool) {
+		if lev, ok := trader.getSymbolLeverage(symbol); ok {
+			return float64(lev), true
+		}
+		return 0, false
+	})
 
 	// Set dual-side position mode (Hedge Mode)
 	// This is required because the code uses PositionSide (LONG/SHORT)
@@ -564,7 +642,7 @@ func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 		for _, pos := range positions {
 			if pos["symbol"] == symbol {
 				if lev, ok := pos["leverage"].(float64); ok {
-					currentLeverage = int(lev)
+					currentLeverage = int(lev + 0.5)
 					break
 				}
 			}
@@ -574,6 +652,7 @@ func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 	// If current leverage is already the target leverage, skip
 	if currentLeverage == leverage && currentLeverage > 0 {
 		logger.Infof("  ✓ %s leverage is already %dx, no need to change", symbol, leverage)
+		t.setSymbolLeverage(symbol, leverage, "api_set")
 		return nil
 	}
 
@@ -593,6 +672,7 @@ func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 	}
 
 	logger.Infof("  ✓ %s leverage changed to %dx", symbol, leverage)
+	t.setSymbolLeverage(symbol, leverage, "api_set")
 
 	// Wait 5 seconds after changing leverage (to avoid cooldown period errors)
 	logger.Infof("  ⏱ Waiting 5 seconds for cooldown period...")

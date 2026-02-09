@@ -34,6 +34,7 @@ type BinanceRealtimeAccountEngine struct {
 
 	recalcInterval time.Duration
 	maxStaleAge    time.Duration
+	leverageLookup func(symbol string) (float64, bool)
 
 	mu sync.RWMutex
 
@@ -60,6 +61,12 @@ func newBinanceRealtimeAccountEngine(gateway *binanceWsReadGateway, recalcInterv
 	}
 	go eng.loop()
 	return eng
+}
+
+func (e *BinanceRealtimeAccountEngine) SetLeverageLookup(fn func(symbol string) (float64, bool)) {
+	e.mu.Lock()
+	e.leverageLookup = fn
+	e.mu.Unlock()
 }
 
 func (e *BinanceRealtimeAccountEngine) loop() {
@@ -179,6 +186,12 @@ func (e *BinanceRealtimeAccountEngine) recalculate() {
 			}
 		} else {
 			stale = true
+		}
+
+		if e.leverageLookup != nil {
+			if lev, ok := e.leverageLookup(symbol); ok && lev > 0 {
+				pos.Leverage = lev
+			}
 		}
 
 		e.baselinePositions[symbol] = pos

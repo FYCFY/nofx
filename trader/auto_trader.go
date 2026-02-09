@@ -310,6 +310,27 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		return nil, fmt.Errorf("unsupported trading platform: %s", config.Exchange)
 	}
 
+	if config.Exchange == "binance" && st != nil {
+		if binanceTrader, ok := trader.(*FuturesTrader); ok {
+			openPositions, posErr := st.Position().GetOpenPositions(config.ID)
+			if posErr != nil {
+				logger.Infof("⚠️ [%s] Failed to seed Binance leverage from local positions: %v", config.Name, posErr)
+			} else {
+				seed := make(map[string]int)
+				for _, p := range openPositions {
+					if p == nil || p.Leverage <= 0 || p.Symbol == "" {
+						continue
+					}
+					seed[p.Symbol] = p.Leverage
+				}
+				binanceTrader.SeedSymbolLeverage(seed)
+				if len(seed) > 0 {
+					logger.Infof("✓ [%s] Seeded %d Binance leverage values from local open positions", config.Name, len(seed))
+				}
+			}
+		}
+	}
+
 	// Validate initial balance configuration, auto-fetch from exchange if 0
 	if config.InitialBalance <= 0 {
 		logger.Infof("📊 [%s] Initial balance not set, attempting to fetch current balance from exchange...", config.Name)
@@ -811,7 +832,7 @@ func (at *AutoTrader) buildTradingContext() (*kernel.Context, error) {
 		// Calculate margin used (estimated)
 		leverage := 10 // Default value, should actually be fetched from position info
 		if lev, ok := pos["leverage"].(float64); ok {
-			leverage = int(lev)
+			leverage = int(lev + 0.5)
 		}
 		marginUsed := (quantity * markPrice) / float64(leverage)
 		totalMarginUsed += marginUsed
@@ -2215,7 +2236,7 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 
 		leverage := 10
 		if lev, ok := pos["leverage"].(float64); ok {
-			leverage = int(lev)
+			leverage = int(lev + 0.5)
 		}
 		marginUsed := (quantity * markPrice) / float64(leverage)
 		totalMarginUsed += marginUsed
@@ -2284,7 +2305,7 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 
 		leverage := 10
 		if lev, ok := pos["leverage"].(float64); ok {
-			leverage = int(lev)
+			leverage = int(lev + 0.5)
 		}
 
 		// Calculate margin used
@@ -2655,7 +2676,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		// Calculate current P&L percentage
 		leverage := 10 // Default value
 		if lev, ok := pos["leverage"].(float64); ok {
-			leverage = int(lev)
+			leverage = int(lev + 0.5)
 		}
 
 		var currentPnLPct float64

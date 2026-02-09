@@ -105,6 +105,8 @@ func (t *FuturesTrader) handleUserStreamEvent(event *futures.WsUserDataEvent) {
 	switch event.Event {
 	case futures.UserDataEventTypeAccountUpdate:
 		t.updateFromAccountUpdate(event.WsUserDataAccountUpdate.AccountUpdate)
+	case futures.UserDataEventTypeAccountConfigUpdate:
+		t.updateFromAccountConfigUpdate(event.WsUserDataAccountConfigUpdate.AccountConfigUpdate)
 	case futures.UserDataEventTypeOrderTradeUpdate:
 		t.updateFromOrderTradeUpdate(event.WsUserDataOrderTradeUpdate.OrderTradeUpdate)
 	case futures.UserDataEventTypeAlgoUpdate:
@@ -133,6 +135,10 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 		if amount < 0 {
 			side = "short"
 		}
+		lev := 10.0
+		if trueLev, ok := t.getSymbolLeverage(pos.Symbol); ok {
+			lev = float64(trueLev)
+		}
 
 		positions = append(positions, map[string]interface{}{
 			"symbol":           pos.Symbol,
@@ -140,7 +146,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			"entryPrice":       entryPrice,
 			"markPrice":        markPrice,
 			"unRealizedProfit": unrealized,
-			"leverage":         10.0,
+			"leverage":         lev,
 			"liquidationPrice": 0.0,
 			"side":             side,
 		})
@@ -150,7 +156,7 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			EntryPrice:       entryPrice,
 			MarkPrice:        markPrice,
 			UnRealizedProfit: unrealized,
-			Leverage:         10.0,
+			Leverage:         lev,
 			LiquidationPrice: 0,
 			Side:             side,
 		})
@@ -181,6 +187,13 @@ func (t *FuturesTrader) updateFromAccountUpdate(update futures.WsAccountUpdate) 
 			UpdateTime:            time.Now().UTC(),
 		})
 	}
+}
+
+func (t *FuturesTrader) updateFromAccountConfigUpdate(update futures.WsAccountConfigUpdate) {
+	if update.Symbol == "" || update.Leverage <= 0 {
+		return
+	}
+	t.setSymbolLeverage(update.Symbol, int(update.Leverage), "ws_config")
 }
 
 func (t *FuturesTrader) updateFromOrderTradeUpdate(update futures.WsOrderTradeUpdate) {
