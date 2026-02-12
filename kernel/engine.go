@@ -2150,8 +2150,8 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		}
 
 		if riskRewardRatio < minRR {
-			return fmt.Errorf("risk/reward ratio too low (%.2f:1), must be ≥%.2f:1 [risk: %.2f%% reward: %.2f%%] [stop loss: %.2f take profit: %.2f]",
-				riskRewardRatio, minRR, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
+			logger.Warnf("⚠️  [RiskReward Soft Check] ratio %.2f:1 below configured minimum %.2f:1 [risk: %.2f%% reward: %.2f%%] [symbol=%s action=%s stop_loss=%.2f take_profit=%.2f]",
+				riskRewardRatio, minRR, riskPercent, rewardPercent, d.Symbol, d.Action, d.StopLoss, d.TakeProfit)
 		}
 	}
 
