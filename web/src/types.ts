@@ -661,9 +661,9 @@ export interface RiskControlConfig {
 
   // Drawdown-based emergency close
   enable_drawdown_close?: boolean;
-  // TP progress percentage (0-100)
+  // Base profit threshold as % of target profit (0-100)
   drawdown_close_progress_pct?: number;
-  // Drawdown percentage from peak (0-100)
+  // Retrace % relative to base profit threshold (0-100)
   drawdown_close_pct?: number;
 }
 

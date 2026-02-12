@@ -249,9 +249,9 @@ type RiskControlConfig struct {
 
 	// Enable drawdown-based emergency close
 	EnableDrawdownClose bool `json:"enable_drawdown_close"`
-	// Drawdown close trigger: TP progress percentage (0-100)
+	// Drawdown close trigger (base threshold): target profit activation percentage (0-100)
 	DrawdownCloseProgressPct float64 `json:"drawdown_close_progress_pct"`
-	// Drawdown close trigger: drawdown percentage from peak (0-100)
+	// Drawdown close trigger (relative threshold): retrace percentage from base threshold (0-100)
 	DrawdownClosePct float64 `json:"drawdown_close_pct"`
 }
 

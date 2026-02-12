@@ -54,6 +54,21 @@ Common reasons:
 ### How often does the AI make decisions?
 Configurable! Default is every **3-5 minutes**. Too frequent = overtrading, too slow = missed opportunities.
 
+### How does Drawdown Close trigger?
+Currently this is enabled for **Binance live trading only**. The rule is:
+**base profit threshold + base-relative drawdown threshold + armed state**.
+
+1. Compute target profit from Entry and TP  
+2. When current PnL reaches `drawdown_close_progress_pct` of target profit, the position becomes armed  
+3. Then retrace is measured from that base threshold using `drawdown_close_pct`; falling to trigger line closes the position (full close)
+
+Example: Entry 100, TP 110, leverage 10x  
+- Target PnL = 100%  
+- If progress threshold = 40%, base PnL = 40%  
+- If drawdown threshold = 40%, allowed retrace = 40% * 40% = 16%  
+- Trigger line = 40% - 16% = 24%  
+- So: arm at +40%, force close at +24%
+
 ### Can I customize the trading strategy?
 Yes! You can:
 - Adjust leverage settings

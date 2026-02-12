@@ -922,7 +922,7 @@ export const translations = {
 
     faqStopLossTakeProfit: 'Does NOFX support stop-loss and take-profit?',
     faqStopLossTakeProfitAnswer:
-      'The AI can suggest stop-loss/take-profit levels in its decisions, but these are guidance-based rather than hard-coded exchange orders. The AI monitors positions each cycle and may decide to close based on P/L. For guaranteed stop-loss, you can set exchange-level orders manually or adjust the strategy prompt to be more conservative.',
+      'Yes. NOFX places exchange-level stop-loss/take-profit orders when opening positions. Binance also supports drawdown close: after reaching the base profit threshold, retrace is measured from that base (not from peak). Example: Entry 100, TP 110, 10x, progress 40%, drawdown 40% => arm at +40% PnL, trigger at +24% PnL. Note: current drawdown close logic is Binance-only.',
 
     faqMultipleTraders: 'Can I run multiple traders?',
     faqMultipleTradersAnswer:
@@ -2084,7 +2084,7 @@ export const translations = {
 
     faqStopLossTakeProfit: 'NOFX 支持止损止盈吗？',
     faqStopLossTakeProfitAnswer:
-      'AI 可以在决策中建议止损/止盈价位，但这是基于指导而非交易所硬编码订单。AI 每个周期监控持仓，可能根据盈亏决定平仓。如需保证止损，可以手动在交易所设置订单，或调整策略提示词使其更保守。',
+      '支持。NOFX 在开仓时会在交易所下止损/止盈单。币安还支持“回撤强平”：先达到基准利润阈值，再按该基准的回撤比例触发（不是按峰值回撤）。例如：开仓100、止盈110、10x、进度40%、回撤40% => 在 +40% 盈利进入监控，回落到 +24% 触发强平。注意：当前回撤强平逻辑仅在 Binance 生效。',
 
     faqMultipleTraders: '可以运行多个交易员吗？',
     faqMultipleTradersAnswer:

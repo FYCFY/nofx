@@ -43,12 +43,12 @@ export function RiskControlEditor({
       minConfidence: { zh: '最小信心度', en: 'Min Confidence' },
       minConfidenceDesc: { zh: 'AI 开仓信心度阈值', en: 'AI confidence threshold for entry' },
       drawdownClose: { zh: '回撤强平', en: 'Drawdown Close' },
-      drawdownCloseDesc: { zh: '达到利润进度后，发生回撤时强制平仓', en: 'Force close on drawdown after reaching profit progress' },
+      drawdownCloseDesc: { zh: '达到目标盈利基准阈值后，按基准回撤阈值触发强制平仓（仅 Binance）', en: 'After reaching the target-profit base threshold, force close on base-relative drawdown (Binance only)' },
       drawdownCloseEnable: { zh: '启用回撤强平', en: 'Enable Drawdown Close' },
-      drawdownProgressPct: { zh: '利润进度阈值 (%)', en: 'TP Progress Threshold (%)' },
-      drawdownProgressPctDesc: { zh: '当前价格相对止盈价的进度阈值', en: 'Progress toward take-profit price' },
-      drawdownPct: { zh: '回撤阈值 (%)', en: 'Drawdown Threshold (%)' },
-      drawdownPctDesc: { zh: '从峰值回撤的百分比阈值', en: 'Drawdown percentage from peak profit' },
+      drawdownProgressPct: { zh: '基准利润阈值 (%)', en: 'Base Profit Threshold (%)' },
+      drawdownProgressPctDesc: { zh: '目标盈利的启动监控比例（例：目标100%，设40即在40%盈利进入监控）', en: 'Activation ratio of target profit (e.g., target 100%, set 40 arms at 40% PnL)' },
+      drawdownPct: { zh: '基准回撤阈值 (%)', en: 'Base Drawdown Threshold (%)' },
+      drawdownPctDesc: { zh: '相对基准利润阈值的回撤比例（例：40/40 => 触发线24%）', en: 'Retrace ratio relative to base profit threshold (e.g., 40/40 => trigger at 24%)' },
     }
     return translations[key]?.[language] || key
   }

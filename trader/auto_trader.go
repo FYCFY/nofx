@@ -144,6 +144,8 @@ type AutoTrader struct {
 	monitorWg             sync.WaitGroup     // Used to wait for monitoring goroutine to finish
 	peakPnLCache          map[string]float64 // Peak profit cache (symbol -> peak P&L percentage)
 	peakPnLCacheMutex     sync.RWMutex       // Cache read-write lock
+	drawdownArmed         map[string]bool    // Drawdown monitor armed state (symbol_side -> armed)
+	drawdownArmedMu       sync.RWMutex       // Guard drawdownArmed
 	lastBalanceSyncTime   time.Time          // Last balance sync time
 	userID                string             // User ID
 	gridState             *GridState         // Grid trading state (only used when StrategyType == "grid_trading")
@@ -409,6 +411,8 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		monitorWg:             sync.WaitGroup{},
 		peakPnLCache:          make(map[string]float64),
 		peakPnLCacheMutex:     sync.RWMutex{},
+		drawdownArmed:         make(map[string]bool),
+		drawdownArmedMu:       sync.RWMutex{},
 		lastBalanceSyncTime:   time.Now(),
 		userID:                userID,
 		pendingLimitOrders:    make(map[string]*pendingLimitOrder),
@@ -2643,8 +2647,45 @@ func (at *AutoTrader) getTakeProfitMapForPositions(positions []map[string]interf
 	return tpMap
 }
 
+func (at *AutoTrader) isDrawdownArmed(posKey string) bool {
+	at.drawdownArmedMu.RLock()
+	defer at.drawdownArmedMu.RUnlock()
+	return at.drawdownArmed[posKey]
+}
+
+func (at *AutoTrader) setDrawdownArmed(posKey string, armed bool) {
+	at.drawdownArmedMu.Lock()
+	defer at.drawdownArmedMu.Unlock()
+	if armed {
+		at.drawdownArmed[posKey] = true
+		return
+	}
+	delete(at.drawdownArmed, posKey)
+}
+
+func (at *AutoTrader) clearDrawdownArmed(posKey string) {
+	at.drawdownArmedMu.Lock()
+	defer at.drawdownArmedMu.Unlock()
+	delete(at.drawdownArmed, posKey)
+}
+
+func (at *AutoTrader) cleanupDrawdownArmedCache(active map[string]bool) {
+	at.drawdownArmedMu.Lock()
+	defer at.drawdownArmedMu.Unlock()
+	for key := range at.drawdownArmed {
+		if !active[key] {
+			delete(at.drawdownArmed, key)
+		}
+	}
+}
+
 // checkPositionDrawdown checks position drawdown situation
 func (at *AutoTrader) checkPositionDrawdown() {
+	// Scope limit: only Binance uses the normalized real-time drawdown close.
+	if !strings.EqualFold(at.exchange, "binance") {
+		return
+	}
+
 	riskControl := at.config.StrategyConfig.RiskControl
 	if !riskControl.EnableDrawdownClose {
 		return
@@ -2665,6 +2706,25 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		return
 	}
 
+	activePositionKeys := make(map[string]bool)
+	for _, pos := range positions {
+		symbol, okSymbol := pos["symbol"].(string)
+		side, okSide := pos["side"].(string)
+		quantity, okQty := pos["positionAmt"].(float64)
+		if !okSymbol || !okSide || !okQty {
+			continue
+		}
+		if quantity < 0 {
+			quantity = -quantity
+		}
+		if quantity <= 0 {
+			continue
+		}
+		posKey := symbol + "_" + side
+		activePositionKeys[posKey] = true
+	}
+	at.cleanupDrawdownArmedCache(activePositionKeys)
+
 	tpMap := at.getTakeProfitMapForPositions(positions)
 	if len(tpMap) == 0 {
 		logger.Infof("📊 Drawdown monitoring: no take profit orders found, drawdown close disabled this cycle")
@@ -2680,6 +2740,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		if quantity < 0 {
 			quantity = -quantity // Short position quantity is negative, convert to positive
 		}
+		if quantity <= 0 {
+			continue
+		}
 
 		tpPrice, ok := tpMap[stopTargetKey(symbol, side)]
 		if !ok || tpPrice <= 0 {
@@ -2693,73 +2756,43 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			leverage = int(lev + 0.5)
 		}
 
-		var currentPnLPct float64
-		if side == "long" {
-			currentPnLPct = ((markPrice - entryPrice) / entryPrice) * float64(leverage) * 100
-		} else {
-			currentPnLPct = ((entryPrice - markPrice) / entryPrice) * float64(leverage) * 100
-		}
-
-		progress := 0.0
-		if side == "long" {
-			denom := tpPrice - entryPrice
-			if denom <= 0 {
-				logger.Infof("📊 Drawdown monitoring: %s %s skip (invalid take profit price)", symbol, side)
-				continue
-			}
-			progress = (markPrice - entryPrice) / denom
-		} else {
-			denom := entryPrice - tpPrice
-			if denom <= 0 {
-				logger.Infof("📊 Drawdown monitoring: %s %s skip (invalid take profit price)", symbol, side)
-				continue
-			}
-			progress = (entryPrice - markPrice) / denom
-		}
-		if progress*100 < progressPctThreshold {
+		posKey := symbol + "_" + side
+		armedBefore := at.isDrawdownArmed(posKey)
+		eval := EvaluateDrawdownTrigger(DrawdownTriggerInput{
+			Side:                 side,
+			EntryPrice:           entryPrice,
+			TakeProfitPrice:      tpPrice,
+			MarkPrice:            markPrice,
+			Leverage:             leverage,
+			ProgressPctThreshold: progressPctThreshold,
+			DrawdownPctThreshold: drawdownPctThreshold,
+			Armed:                armedBefore,
+		})
+		if eval.SkipReason != "" {
+			logger.Infof("📊 Drawdown monitoring: %s %s skip (%s)", symbol, side, eval.SkipReason)
 			continue
 		}
+		at.setDrawdownArmed(posKey, eval.Armed)
 
-		// Construct unique position identifier (distinguish long/short)
-		posKey := symbol + "_" + side
+		// Preserve peak profit context for AI output.
+		at.UpdatePeakPnL(symbol, side, eval.CurrentPnLPct)
 
-		// Get historical peak profit for this position
-		at.peakPnLCacheMutex.RLock()
-		peakPnLPct, exists := at.peakPnLCache[posKey]
-		at.peakPnLCacheMutex.RUnlock()
-
-		if !exists {
-			// If no historical peak record, use current P&L as initial value
-			peakPnLPct = currentPnLPct
-			at.UpdatePeakPnL(symbol, side, currentPnLPct)
-		} else {
-			// Update peak cache
-			at.UpdatePeakPnL(symbol, side, currentPnLPct)
-		}
-
-		// Calculate drawdown (magnitude of decline from peak)
-		var drawdownPct float64
-		if peakPnLPct > 0 && currentPnLPct < peakPnLPct {
-			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
-		}
-
-		// Check close position condition: progress >= threshold of TP target and drawdown >= threshold
-		if drawdownPct >= drawdownPctThreshold {
-			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | Current profit: %.2f%% | Peak profit: %.2f%% | Drawdown: %.2f%% | TP progress: %.2f%%",
-				symbol, side, currentPnLPct, peakPnLPct, drawdownPct, progress*100)
+		if eval.ShouldClose {
+			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | current=%.2f%% | base=%.2f%% | trigger=%.2f%% | target=%.2f%% | armed=%t→%t",
+				symbol, side, eval.CurrentPnLPct, eval.BasePnLPct, eval.TriggerPnLPct, eval.TargetPnLPct, armedBefore, eval.Armed)
 
 			// Execute close position
 			if err := at.emergencyClosePosition(symbol, side); err != nil {
 				logger.Infof("❌ Drawdown close position failed (%s %s): %v", symbol, side, err)
 			} else {
 				logger.Infof("✅ Drawdown close position succeeded: %s %s", symbol, side)
-				// Clear cache for this position after closing
+				// Clear local monitor state after successful close.
+				at.clearDrawdownArmed(posKey)
 				at.ClearPeakPnLCache(symbol, side)
 			}
-		} else if currentPnLPct > 0 {
-			// Record situations close to close position condition (for debugging)
-			logger.Infof("📊 Drawdown monitoring: %s %s | Profit: %.2f%% | Peak: %.2f%% | Drawdown: %.2f%% | TP progress: %.2f%%",
-				symbol, side, currentPnLPct, peakPnLPct, drawdownPct, progress*100)
+		} else if eval.Armed && eval.CurrentPnLPct > 0 {
+			logger.Infof("📊 Drawdown monitoring: %s %s | current=%.2f%% | base=%.2f%% | trigger=%.2f%% | target=%.2f%% | armed=%t",
+				symbol, side, eval.CurrentPnLPct, eval.BasePnLPct, eval.TriggerPnLPct, eval.TargetPnLPct, eval.Armed)
 		}
 	}
 }
